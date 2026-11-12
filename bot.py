@@ -452,6 +452,70 @@ def main():
     # 刚有动静就先让路，避免「回复到一半被自己的主动消息打断」。
     ACTIVITY = {'ts': 0.0}
 
+    # ---- 入站去重 ----
+    # 同一条消息被处理两次就会回两遍，而这条链路上有好几处会重复投递：
+    #   * 微信自己在弱网/多端在线时把同一消息写成两行（sort_seq 不同、local_id
+    #     可能相同也可能不同）；
+    #   * 同一个会话被注册了两个回调（昵称与备注都进了 private_chats，或群名
+    #     与某个私聊同名）——listener 是按 wxid 追加回调的，不去重；
+    #   * listener 水位落盘失败后重启，把上次没确认的消息又派发了一遍。
+    # 三道口径都挡一遍，命中就整条丢弃，连模型请求都不发。
+    SEEN_LID = {}       # (会话, local_id) -> 首次见到的时间
+    SEEN_TXT = {}       # (会话, 发送者, create_time, 正文) -> 首次见到的时间
+    LAST_TXT = {}       # (会话, 发送者, 正文) -> 上次见到的时间
+    DEDUP_LID_TTL = 900.0    # 同一条消息 15 分钟内不会需要再处理一次
+    DEDUP_TXT_TTL = 900.0
+    DEDUP_BURST = 2.0        # 同内容在 2 秒内重复出现，按重发处理
+
+    def inbound_duplicate(chat_name, sender, msg, raw_text):
+        """返回重复原因（非空即重复）。带清理，长期运行不会涨内存。"""
+        now = time.time()
+        if len(SEEN_LID) > 3000:
+            for k, ts in [kv for kv in SEEN_LID.items() if now - kv[1] > DEDUP_LID_TTL]:
+                SEEN_LID.pop(k, None)
+        if len(SEEN_TXT) > 3000:
+            for k, ts in [kv for kv in SEEN_TXT.items() if now - kv[1] > DEDUP_TXT_TTL]:
+                SEEN_TXT.pop(k, None)
+        for k, ts in [kv for kv in LAST_TXT.items() if now - kv[1] > DEDUP_BURST]:
+            LAST_TXT.pop(k, None)
+
+        lid = getattr(msg, 'local_id', None)
+        if lid:
+            k1 = (chat_name, int(lid))
+            if k1 in SEEN_LID:
+                return 'local_id=%s 已处理过' % lid
+            SEEN_LID[k1] = now
+
+        ct = int(getattr(msg, 'create_time', 0) or 0)
+        if ct:
+            k2 = (chat_name, sender, ct, raw_text)
+            if k2 in SEEN_TXT:
+                return '同一秒同内容已处理过'
+            SEEN_TXT[k2] = now
+
+        k3 = (chat_name, sender, raw_text)
+        prev = LAST_TXT.get(k3)
+        LAST_TXT[k3] = now
+        if prev is not None and now - prev < DEDUP_BURST:
+            return '%.1f 秒内同一内容重复到达' % (now - prev)
+        return ''
+
+    # ---- 出站防重 ----
+    # 入站去重漏网时（比如两条记录 local_id、create_time 都不一样），最后再拦一道：
+    # 同一个会话 3 秒内要发一模一样的回复，正常对话不会发生。
+    OUT_LAST = {}
+    OUT_WINDOW = 3.0
+
+    def recently_sent(chat, text):
+        now = time.time()
+        for k, ts in [kv for kv in OUT_LAST.items() if now - kv[1] > OUT_WINDOW]:
+            OUT_LAST.pop(k, None)
+        prev = OUT_LAST.get((chat, text))
+        return prev is not None and now - prev < OUT_WINDOW
+
+    def remember_sent(chat, text):
+        OUT_LAST[(chat, text)] = time.time()
+
     def on_msg(msg, chat):
         ACTIVITY['ts'] = time.time()
         chat_name = str(getattr(chat, 'who', '') or '')
@@ -467,6 +531,13 @@ def main():
             (mtype != 'text' and not is_vision_msg) or
             int(getattr(msg, 'create_time', 0) or 0) <= started_at):
             return
+        dup = inbound_duplicate(chat_name, sender, msg, raw_msg)
+        if dup:
+            print('跳过重复消息（%s）：%s → %s' % (
+                dup, sender, (raw_msg[:30] + '…') if len(raw_msg) > 30 else raw_msg),
+                flush=True)
+            return
+
         sticker_png = None
         if is_sticker_msg:
             # 读不到图就保持沉默，绝不瞎猜图片内容
@@ -612,15 +683,20 @@ def main():
                                   f'{detail.get("Error", "")}', file=sys.stderr, flush=True)
             text_sent = False
             if answer and not voice_used:
-                if is_private:
-                    sent = chat.SendMsg(answer)
-                    if not sent:
-                        raise RuntimeError(f'私聊发送失败：{sent}')
-                    label = f'私聊 {chat_name}'
+                label = f'私聊 {chat_name}' if is_private else f'群聊 {chat_name}'
+                if recently_sent(chat_name, answer):
+                    # 走到这里说明入站去重漏了；宁可少发一条，也不要刷屏
+                    print(f'跳过重复发送（{label} 3 秒内已发过同样内容）', flush=True)
+                    text_sent = True
                 else:
-                    send_background(db, resolved, group, answer)
-                    label = f'群聊 {chat_name}'
-                text_sent = True
+                    if is_private:
+                        sent = chat.SendMsg(answer)
+                        if not sent:
+                            raise RuntimeError(f'私聊发送失败：{sent}')
+                    else:
+                        send_background(db, resolved, group, answer)
+                    text_sent = True
+                    remember_sent(chat_name, answer)
                 if is_vision_msg:
                     kind = '照片' if is_photo_msg else '表情包'
                     print(f'已识别{kind}并回复（{label}）。', flush=True)
@@ -663,17 +739,34 @@ def main():
         except Exception as exc:
             print('处理消息失败：' + str(exc), file=sys.stderr, flush=True)
 
-    result = wc.AddListenChat(nickname=group, callback=on_msg)
-    if isinstance(result, dict) and not result:
-        raise RuntimeError('群聊监听注册失败：' + str(result))
-    print('群聊监听注册结果：', result, flush=True)
+    # 按 wxid 去重：listener 的回调是按 wxid 追加的，同一个会话注册两次就会
+    # 收到两份回调、回两条。昵称与备注同时出现在名单里、群名与私聊重名都会中招。
+    listened_wxid = {}      # wxid -> 第一次成功注册用的名字
+
+    def register(nickname, kind):
+        try:
+            wxid = db.username_by_nickname(nickname) or nickname
+        except Exception:
+            wxid = nickname
+        if wxid in listened_wxid:
+            print(f'[跳过] {kind}「{nickname}」与「{listened_wxid[wxid]}」是同一个会话，'
+                  '已注册监听，不重复注册（否则一条消息会回两次）',
+                  file=sys.stderr, flush=True)
+            return False
+        r = wc.AddListenChat(nickname=nickname, callback=on_msg)
+        if isinstance(r, dict) and not r:
+            print(f'[警告] {kind}「{nickname}」监听注册失败：{r}', file=sys.stderr, flush=True)
+            return False
+        listened_wxid[wxid] = nickname
+        return True
+
+    if not register(group, '群聊'):
+        raise RuntimeError('群聊监听注册失败：' + group)
+    print('群聊监听注册结果：', group, flush=True)
     registered = 1
     ok_private = []
     for nickname in private_targets:
-        r = wc.AddListenChat(nickname=nickname, callback=on_msg)
-        if isinstance(r, dict) and not r:
-            print(f'[警告] 私聊「{nickname}」监听注册失败：{r}', file=sys.stderr, flush=True)
-        else:
+        if register(nickname, '私聊'):
             registered += 1
             ok_private.append(nickname)
             print(f'私聊监听已注册：{nickname}', flush=True)
