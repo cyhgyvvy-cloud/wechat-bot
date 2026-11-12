@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """把 config.json 的 voice 段切到独立引擎，并补齐 TTS 相关字段（幂等）。"""
+import paths
 import json
 import pathlib
 import shutil
 import sys
 
-BOT = pathlib.Path(__file__).resolve().parent
+BOT = paths.ROOT
 CFG = BOT / 'config.json'
 
 WANT = {

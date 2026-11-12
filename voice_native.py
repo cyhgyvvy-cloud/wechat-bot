@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import paths
 import array
 import ctypes
 import time
@@ -291,7 +292,7 @@ def selftest(play: bool = True) -> int:
     """不碰微信，只验证「合成 -> 解码 -> 指定设备播放」是否可用。"""
     import json
 
-    bot = Path(__file__).resolve().parent
+    bot = paths.ROOT
     raw = {}
     try:
         raw = (json.loads((bot / 'config.json').read_text(encoding='utf-8-sig')).get('voice') or {})

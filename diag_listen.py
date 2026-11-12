@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """监听探针：验证 AddListenChat 是否能收到新消息（发给自己，不打扰别人）。"""
+import paths
 import json
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 sys.path.insert(0, str(ROOT))
 
 import bot            # noqa: E402

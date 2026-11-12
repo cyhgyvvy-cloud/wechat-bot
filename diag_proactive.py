@@ -5,13 +5,14 @@
   python diag_proactive.py            # 跑全部用例
   python diag_proactive.py --plan     # 只看当前配置会怎么排
 """
+import paths
 import json
 import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 sys.path.insert(0, str(ROOT))
 
 import proactive  # noqa: E402

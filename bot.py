@@ -1,3 +1,4 @@
+import paths
 import json
 import os
 import re
@@ -16,8 +17,51 @@ import vision     # 收到表情包的识图预处理（CDN 回源 -> data URL�
 import voice      # 真·语音气泡（虚拟声卡录制链路，实现见 voice.py）
 import proactive  # 主动发消息（空闲时自己挑个会话开口）
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 ACCOUNT_CACHE = ROOT / '.account_cache.json'
+
+if getattr(sys, 'frozen', False):
+    # 打包成 exe 后按 GUI 子系统启动，sys.stdout / sys.stderr 是 None，
+    # 任何 print 都会抛 AttributeError。这里把两路输出接到日志文件，
+    # 同时保留原设备（命令行启动时还能看到）。
+    class _Tee:
+        def __init__(self, path, mirror=None):
+            self._mirror = mirror
+            self._fh = None
+            try:
+                self._fh = open(path, 'a', encoding='utf-8', buffering=1)
+            except Exception:
+                pass
+
+        def write(self, s):
+            if self._fh is not None:
+                try:
+                    self._fh.write(s)
+                    self._fh.flush()
+                except Exception:
+                    pass
+            if self._mirror is not None:
+                try:
+                    self._mirror.write(s)
+                    self._mirror.flush()
+                except Exception:
+                    pass
+            return len(s)
+
+        def flush(self):
+            for f in (self._fh, self._mirror):
+                if f is not None:
+                    try:
+                        f.flush()
+                    except Exception:
+                        pass
+
+        def isatty(self):
+            return False
+
+    sys.stdout = _Tee(ROOT / 'bot.log', sys.stdout)
+    sys.stderr = _Tee(ROOT / 'error.log', sys.stderr)
+
 _GUI_CACHE = {}          # 预热好的 WeChatGUI 实例，供发送复用
 _CHANCE_CACHE = {'mtime': None, 'base': 0.25, 'by_chat': {}, 'loaded': False}
 
@@ -378,14 +422,27 @@ def get_key():
 def main():
     from wechatauto import WeChat
     t_boot = time.perf_counter()
+    cfg_file = ROOT / 'config.json'
+    if not cfg_file.is_file():
+        raise RuntimeError(
+            '没有找到 config.json。\n'
+            '请把同目录下的 config.example.json 复制一份、改名为 config.json，'
+            '再填好群名和接口信息。')
     try:
-        config = json.loads((ROOT / 'config.json').read_text(encoding='utf-8-sig'))
+        config = json.loads(cfg_file.read_text(encoding='utf-8-sig'))
     except json.JSONDecodeError as exc:
         # 记事本改配置最常见的两种坏法：多/少逗号、用中文引号或全角逗号
         raise RuntimeError(
             'config.json 格式不对：%s\n'
             '请检查第 %s 行附近：逗号是否多余或缺失、引号是否为半角英文 "、'
             '括号是否闭合。' % (exc.msg, exc.lineno)) from exc
+    missing = [k for k in ('group_name', 'bot_name', 'base_url', 'model')
+               if not str(config.get(k) or '').strip()]
+    if missing:
+        raise RuntimeError(
+            'config.json 缺少必填项：%s\n'
+            '请补全后重试；可对照 config.example.json 看完整格式。'
+            % '、'.join(missing))
     group, name = config['group_name'].strip(), config['bot_name'].strip()
     if not group or (config['trigger'] == 'mention' and not name):
         raise RuntimeError('请先在 config.json 填写群名和机器人群昵称。')

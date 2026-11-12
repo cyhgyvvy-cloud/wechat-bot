@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """表情包快路径实测：发到「文件传输助手」，测量从调用到落库的真实耗时。"""
+import paths
 import json
 import re
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 sys.path.insert(0, str(ROOT))
 
 import bot        # noqa: E402

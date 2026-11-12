@@ -5,13 +5,14 @@
   python gen_voice_key.py                # 从旧版程序的密钥迁移（需旧版程序仍在）
   python gen_voice_key.py brz_xxxxxxxx   # 直接写入明文密钥（会自动加密）
 """
+import paths
 import json
 import pathlib
 import sys
 
 import win32crypt
 
-BOT = pathlib.Path(__file__).resolve().parent
+BOT = paths.ROOT
 DST = BOT / 'breeze.key'
 DEF_ROOT = pathlib.Path(r'D:\Bots\LegacyVoice')
 

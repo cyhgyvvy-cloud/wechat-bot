@@ -11,13 +11,14 @@
   * 0% = 只在用户明确说「发个表情包」时才发；100% = 每条消息都尝试发。
   * 识图轮、严肃话题、同一会话正在发图时不会发，不受这个概率影响。
 """
+import paths
 import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 CFG = ROOT / 'config.json'
 
 

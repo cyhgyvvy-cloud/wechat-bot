@@ -43,3 +43,12 @@ desktop.ini
 
 # ---------------- 本地生成的清单 ----------------
 list-private.txt
+
+# ---------------- 打包中间产物 / 发布目录 ----------------
+build/
+build_*/
+dist/
+dist_*/
+release/
+_shot_cfg.py
+_console*.png

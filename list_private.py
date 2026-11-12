@@ -8,11 +8,12 @@
     python list_private.py [输出文件]
 默认写到脚本同目录的 list-private.txt（UTF-8 with BOM，记事本可读）。
 """
+import paths
 import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 sys.path.insert(0, str(ROOT))
 
 

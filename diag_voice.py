@@ -4,6 +4,7 @@
 用法：
   python diag_voice.py             # 发一条自检语音，打印完整时间线
 """
+import paths
 import json
 import os
 import sys
@@ -11,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.ROOT
 sys.path.insert(0, str(ROOT))
 
 import voice         # noqa: E402

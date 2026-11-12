@@ -22,6 +22,7 @@ legacy 不重写协议，直接加载外部目录下 bridge/voice_reply.py 的 d
     voice-send-breeze.key（DPAPI 加密，当前用户可解）
   * 已安装 VB-Audio Virtual Cable（CABLE Input / Output）
 """
+import paths
 import importlib.util
 import json
 import os
@@ -101,7 +102,7 @@ def check_dependencies(root: str | Path, voice_cfg=None) -> list[str]:
             import voice_native
         except Exception as exc:
             return ['voice_native 模块（%s: %s）' % (type(exc).__name__, exc)]
-        return voice_native.deps(cfg, Path(__file__).resolve().parent)
+        return voice_native.deps(cfg, paths.ROOT)
     r = Path(root)
     missing = []
     # 启动器文件名随外部程序而异，写在 voice.launcher 里，不硬编码
@@ -206,7 +207,7 @@ def _send_native(text: str, who: str, gui, cfg: dict,
         import voice_native
     except Exception as exc:
         return False, {'Status': 'failed', 'Error': f'加载 voice_native 失败：{exc}'}
-    here = Path(__file__).resolve().parent
+    here = paths.ROOT
     missing = voice_native.deps(cfg, here)
     if missing:
         return False, {'Status': 'failed', 'Error': '语音依赖缺失：' + '、'.join(missing)}
