@@ -1,0 +1,16 @@
+# 默认按文本处理，自动识别换行
+* text=auto
+
+# Windows 脚本必须保持 CRLF，否则 cmd / wscript 解析会出问题
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.vbs  text eol=crlf
+*.ps1  text eol=crlf
+
+# Python 与文档用 LF，避免跨平台差异
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+
+# 说明文档保留原样（含 UTF-8 BOM，老版记事本依赖它识别编码）
+使用说明.txt -text

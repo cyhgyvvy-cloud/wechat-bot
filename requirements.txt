@@ -1,0 +1,14 @@
+# 核心依赖
+requests>=2.32.3
+wechatauto-replica[guia]==1.2.8.0
+
+# 语音：合成后的音频播放（WASAPI 指定设备）
+miniaudio>=1.70
+
+# 识图：表情包 / 照片处理
+pillow>=10.0
+cryptography>=42.0
+
+# Windows 集成：DPAPI 密钥、键鼠与进程
+pywin32>=306
+psutil>=5.9

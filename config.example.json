@@ -1,0 +1,87 @@
+{
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "group_name": "测试群",
+  "bot_name": "机器人",
+  "trigger": "all",
+  "prefix": "小鲸",
+  "history_messages": 12,
+  "private_chats": [
+    "示例好友A",
+    "示例好友B"
+  ],
+  "private_trigger": "inherit",
+  "notify_on_start": true,
+  "startup": {
+    "fast_account": true,
+    "warmup_gui": true
+  },
+  "sticker": {
+    "enabled": true,
+    "dir": "D:/机器人/stickers",
+    "chance": 0.6,
+    "chance_by_chat": {},
+    "recent": 10,
+    "fast": true,
+    "fast_wait": 0.8
+  },
+  "vision": {
+    "enabled": true,
+    "allow_network": true,
+    "photos": true,
+    "photo_retries": 5,
+    "photo_retry_wait": 0.5,
+    "reply_on_fail": true
+  },
+  "voice": {
+    "enabled": true,
+    "legacy_dir": "D:/机器人/LegacyVoice",
+    "launcher": "Launcher.exe",
+    "chance": 0.2,
+    "max_chars": 120,
+    "groups": true,
+    "private": true,
+    "engine": "native",
+    "tts_base": "https://api.breeze.blue/v1",
+    "tts_model": "breeze-tts-2-multilingual",
+    "tts_voice": "voc_u3nxkd5578wc",
+    "out_device": "CABLE Input",
+    "hotkey": "Ctrl+Tab",
+    "lead_in_ms": 400,
+    "tail_ms": 600
+  },
+  "proactive": {
+    "enabled": true,
+    "targets": [
+      {
+        "type": "group",
+        "weight": 1
+      },
+      {
+        "type": "private",
+        "weight": 1
+      }
+    ],
+    "interval_min": 30,
+    "interval_max": 90,
+    "active_hours": "08:30-23:00",
+    "daily_limit": 14,
+    "per_target_daily": 6,
+    "min_gap_minutes": 45,
+    "idle_minutes": 15,
+    "require_user_idle_seconds": 90,
+    "history_lines": 8,
+    "max_chars": 60,
+    "avoid_repeat": true,
+    "topics": [
+      "今天吃了什么，随口问问",
+      "最近有没有什么想去的地方",
+      "吐槽一下天气",
+      "分享一件今天遇到的小事",
+      "问问对方最近在忙什么",
+      "说一个刚想到的冷知识",
+      "推荐一首最近在听的歌",
+      "聊聊这周末打算怎么过"
+    ]
+  }
+}

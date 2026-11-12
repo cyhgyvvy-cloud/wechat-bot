@@ -1,0 +1,115 @@
+﻿鲸鱼微信机器人（Windows）
+
+首次使用：
+1. 安装 64 位 Python 3.11，并安装、登录 Windows 微信。让机器人账号加入目标群。
+2. 编辑 config.json：填写 OpenAI 兼容接口的 Base URL、服务商提供的模型 ID、群聊名称和机器人群昵称。
+3. 双击 install_env.bat 安装 Python 依赖。
+4. 右键“使用 PowerShell 运行”设置密钥.ps1，输入 API Key。密钥由当前 Windows 用户加密保存到 secret.txt。
+   这是聊天用的模型密钥；语音用的 TTS 密钥是另外一份 breeze.key，见下方「语音回复」，不要语音可以跳过。
+5. 确认目标群在微信会话列表第一位且输入框无草稿，然后双击启动后台.vbs。停止时双击停止后台.vbs。
+
+说明：
+- trigger=all：尝试回复启动后目标群收到的每条新文字消息；mention：仅回复 @机器人昵称的消息；prefix：仅回复以 prefix 开头的消息。
+- 修改 persona.txt 后下一条消息生效；修改 config.json 后大部分开关立即生效（按文件 mtime 热加载），改 trigger / 群名 / 模型等启动参数需重启。
+- bot.log 和 error.log 用于查看运行状态和错误。
+- secret.txt 只能由创建它的 Windows 用户解密。不要上传或分享 secret.txt、日志、微信数据或账号资料。
+- 需要微信保持登录、电脑运行并联网。此程序依赖第三方微信自动化，可能受微信版本变化影响，也可能触发平台限制；请自行评估并遵守微信规则。
+- 当前发送实现依赖微信桌面界面操作，可能切换窗口并影响键鼠焦点，不适合需要完全无打扰操作的环境。
+
+可选功能（都在 config.json 里开关，改完不用重启）：
+- 私聊回复：private_chats 填备注名或昵称（精确匹配），例：["张三","李四"]。留空 = 不回复任何私聊。
+- 表情包：sticker.enabled + sticker.dir 指向图库（一级子目录名即分类，如 开心/傲娇/炸毛）。
+  sticker.chance 是主动配图概率（0~1，当前 0.6），sticker.chance_by_chat 可按会话单独覆盖；
+  也能双击 设置发图几率.bat 交互式改。用户明确说“发个表情包”时必定发图。
+  sticker.fast=true 走快路径（实测约 1 秒落库），失败自动回退标准发送。
+- 识图：vision.enabled 打开后，收到的表情包 / 照片会先发给模型服务商再回应。
+  vision.allow_network 控制表情包是否回源 CDN，vision.photos 控制照片解密识别，
+  vision.reply_on_fail=true 时读不到图会回一句提示，而不是装没看见。
+- 语音回复：voice.enabled + voice.chance（0~1 的随机概率；被明确要求“发语音”时必定发）。
+  voice.groups / voice.private 分别控制群聊、私聊是否允许；voice.max_chars 限制朗读字数。
+  语音发送失败会自动回退成文字，不会一声不吭。
+  整套语音由程序自己完成：合成 → 播到虚拟声卡 → 按快捷键让微信录音 → 松开发送。
+  不需要任何外部程序，也不需要先打开界面。前提是三样：
+    · VB-CABLE 虚拟声卡（设备名含 CABLE Input / CABLE Output）
+    · breeze.key（TTS 密钥，按机器+用户加密，只有生成它的账户能解密）
+    · 微信「按住说话」快捷键与 voice.hotkey 一致（当前 Ctrl+Tab）
+  相关配置都在 config.json 的 voice 里，改完不用重启：
+    · engine        native（默认，独立实现）| legacy（旧实现，交给外部启动器干）
+    · legacy_dir    仅 legacy 引擎用：外部程序所在目录
+    · launcher      仅 legacy 引擎用：该目录下启动器的文件名
+    · tts_base      TTS 接口地址，默认 https://api.breeze.blue/v1
+    · tts_model     模型 ID，默认 breeze-tts-2-multilingual
+    · tts_voice     音色 ID，默认 voc_u3nxkd5578wc
+    · out_device    声音播到哪个设备，默认 "CABLE Input"，按名称模糊匹配
+    · hotkey        录音热键，默认 Ctrl+Tab，写法如 "Ctrl+Alt+V"
+    · lead_in_ms    先按住热键、再开始播音的提前量，默认 400 毫秒
+    · tail_ms       播完后继续保持按住的时间，默认 600 毫秒
+  语音开头或结尾被吞掉时，把 lead_in_ms / tail_ms 各加 200~300 再试。
+  breeze.key 的生成方式（在机器人目录里执行）：
+    · python gen_voice_key.py brz_你的密钥      直接写入明文密钥，自动加密
+    · python gen_voice_key.py                   从旧版程序的旧密钥迁移一份
+    · python voice_native.py                    离线自检三件事，不碰微信
+- 主动发消息：proactive.enabled 打开后，机器人会在没人说话的时候自己挑个会话开口。
+  targets 决定发给谁：{"type":"group"} 是群聊，{"type":"private"} 是 private_chats
+  里的全部私聊，{"type":"private","name":"某人"} 只发这一个；每项可带 weight 调权重。
+  节奏由 interval_min / interval_max 控制（分钟，每轮随机取），active_hours 是允许
+  发言的时段（支持跨午夜，如 "18:00-02:00"）。默认 30~90 分钟一次、08:30~23:00。
+  为防扰民还叠了五道闸门，任一条不满足就当轮跳过、不影响下一轮：
+    · min_gap_minutes       同一会话两次之间至少隔多久（默认 45 分钟）
+    · per_target_daily      单会话每天最多几条（默认 6）
+    · daily_limit           所有会话合计每天最多几条（默认 14）
+    · idle_minutes          目标会话必须已安静这么多分钟（默认 15），别人正在聊就不插嘴
+    · require_user_idle_seconds  你键鼠需空闲这么多秒（默认 90），避免正用电脑时抢窗口
+  内容优先接该会话最近几条聊天（history_lines，默认 8；图片/表情/链接会压成占位符，
+  不会把 wxid、aeskey 塞给模型），没有上下文就从 topics 里挑一个，用 persona.txt 的
+  口吻说出来。max_chars 限制长度（默认 60）；avoid_repeat=true 时，如果生成得和最近
+  发过的太像，会要求模型换个角度重写一次。
+  已发记录在 cache/proactive-state.json：重启不清零当天额度，也不会立刻补发一轮。
+  想立刻看效果，把 interval_min / interval_max 改成 1 和 2，等下一条日志即可。
+常见问题：
+- 启动后没有任何反应：先看 bot.log 是否出现“正在监听 N 个会话”。没有就说明启动失败，
+  错误原因在 error.log 和弹窗里。已运行时会锁 bot.lock，重复启动会被拒绝。
+- 群聊不回复：确认群名与微信里完全一致、该群在会话列表第一位、窗口没被其他窗口遮挡、
+  微信窗口没有被缩到很小（发送前会检查窗口尺寸）。
+- 语音发不出去：
+  · 先看微信本身是不是白屏了（窗口只剩一片空白、看不到会话列表）。微信渲染层
+    崩掉时 UIA 读不到任何控件，会连续报「无法确认目标账号或会话」「发送超时」。
+    这种情况只能重启微信（任务管理器结束 Weixin.exe 再打开）。
+  · 日志出现 sent_unconfirmed / uncertain 不代表失败。程序拿不到微信回执时
+    会这么报，但消息通常已经发出去了，去聊天记录里看语音气泡的时长即可确认。
+    程序只在 Error 明确说「无法确认会话 / 快捷键不一致」时才判定为真失败并重试。
+  · 气泡出来了但点开完全没声音：虚拟声卡装过多次会留下 2-、3- 前缀的重复设备，
+    它们各自是一条独立的线，播到 A 号的 Input 只有 A 号的 Output 能收到。
+    到「设置 → 系统 → 声音」确认默认录音设备是和播放同一组的、不带前缀的
+    CABLE Output。这一类问题日志里一个字都不会报，只能靠这一项对齐。
+  · 微信「按住说话」快捷键必须与 config.json 的 voice.hotkey 一致（当前 Ctrl+Tab）。
+    这一项存在微信自己的设置里，重装微信、换机器、升级大版本后都要重设一次。
+  · 日志停在「语音合成」之前、压根没生成音频：在机器人目录执行 python voice_native.py，
+    它会离线验证「合成 → 解码 → 播到指定设备」三件事并逐行说明卡在哪一步，
+    全程不碰微信，可以放心反复跑。
+  · 想彻底确认声音有没有真的进虚拟线缆：把 out_device 和默认录音设备都指向
+    CABLE，用任意录音软件录 CABLE Output，播一段语音看是否有波形。
+- 主动消息一直不发：先看 bot.log 有没有“主动消息：已就绪（活跃时段 …，约 N 分钟后
+  首次检查）”，说明线程起来了。之后每轮跳过都会打一行原因：
+  · “跳过，你正在用电脑（空闲 xxs < 90s）”→ 你在动键鼠，等一会儿
+  · “跳过，刚刚在处理消息”→ 主线程正在回消息，让路
+  · “本轮没有可发的会话（…）”→ 后面括号里是具体原因，常见为不在活跃时段、
+    当天额度用完、目标会话最近聊过、或距上次不足最小间隔
+  如果连“已就绪”都没有，就是 proactive.enabled 没打开。
+- 主动消息发得太频繁或太安静：调 interval_min / interval_max（分钟）与 daily_limit；
+  只想让某个会话收到，就把 targets 改成只留一项，或给不要的那项加 "enabled": false。
+- 微信重启后第一次启动机器人较慢：DB 快照要重新解密，可能 8~12 秒，属正常。
+- 模型接口 429 / 503：程序会自动按 Retry-After 或 1.5s→3s 退避重试最多 3 次，
+  日志里能看到“模型接口 429（1/3），x.xs 后重试”。密钥错误（401）不重试，直接报错。
+
+换机器或重装系统时必须重做的四件事（这几项都绑在本机，任何备份都带不走）：
+1. secret.txt 与 breeze.key —— 重新生成，别拷贝。DPAPI 按机器+用户加密，
+   复制过去只会解密失败。分别用 设置密钥.ps1 和 gen_voice_key.py。
+2. 微信「按住说话」快捷键 —— 在微信设置里重设为 voice.hotkey（当前 Ctrl+Tab）。
+   它存在微信自己的配置里，装完新微信就是空的，日志会提示“快捷键与配置不一致”。
+3. 虚拟声卡的设备对应关系 —— out_device 按设备名匹配，设备名或数量变了就要改；
+   默认录音设备也要重设为同一组的 CABLE Output，否则气泡正常但静音。
+4. .venv 目录 —— 不要拷贝，解释器路径写死在里面。按 install_env.bat 重装更快更稳。
+
+不要拷贝、也不建议上传的内容：secret.txt、breeze.key、bot.log、error.log、
+cache/、bot.pid、bot.lock，以及微信自身的任何数据目录。

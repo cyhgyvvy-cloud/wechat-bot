@@ -1,0 +1,45 @@
+# ---------------- 虚拟环境 ----------------
+.venv/
+venv/
+env/
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------------- 密钥与本地配置（绝不提交） ----------------
+secret.txt
+breeze.key
+*.key
+config.json
+config.json.*
+.account_cache.json
+
+# ---------------- 运行产物 ----------------
+cache/
+wechatauto_logs/
+bot.lock
+bot.pid
+bot.log
+bot.log.*
+error.log
+error.log.*
+@AutomationLog.txt
+
+# ---------------- 备份 / 安装包 / 归档 ----------------
+*.bak
+*.bak2
+*.zip
+python-3.*-amd64.exe
+_已删除_唱歌备份/
+_t_live.py
+
+# ---------------- 系统 ----------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------- 本地生成的清单 ----------------
+list-private.txt
