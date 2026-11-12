@@ -196,7 +196,7 @@ class Console:
         self.ensure_config()
         self.load_config()
         # 先让窗口画出来，再去做进程探测（首次没有 bot.pid 时要扫进程，稍慢）
-        self.root.after(20, self.refresh_status)
+        self.root.after(220, self.refresh_status)
         self._seek_tail()
         self.pump_log()
 
