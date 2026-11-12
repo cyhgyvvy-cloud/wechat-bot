@@ -26,6 +26,11 @@ BOT_NAME = '微信机器人'
 POLL_MS = 1200
 MAX_LOG_LINES = 4000
 CREATE_NO_WINDOW = 0x08000000
+READY_MARK = '正在监听'      # bot.py 打出这行才算「能回消息了」
+WECHAT_NAMES = ('weixin.exe', 'wechat.exe')
+RETRY_MAX = 6                # 启动即退时的自动重试次数
+RETRY_GAP = 8.0              # 每次重试间隔（秒）
+BOT_DIR = paths.ROOT         # 机器人在哪（Console 初始化时按实际目录覆盖）
 
 
 # ---------------------------------------------------------------- 定位
@@ -48,20 +53,63 @@ def locate_bot():
     return [str(py), str(bot_py)], str(root), '%s bot.py' % py.name
 
 
+def wechat_started():
+    """微信是否已经起来了（进程存在即算）。起来了才值得拉起机器人。"""
+    try:
+        import psutil
+    except Exception:
+        return True          # 探测不了就别卡着不启动
+    for p in psutil.process_iter(['name']):
+        try:
+            if (p.info.get('name') or '').lower() in WECHAT_NAMES:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _pid_hit(pid):
+    """这个 pid 是不是本机器人（顺手带回启动时间）。"""
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        name = (p.name() or '').lower()
+        ok = name == (BOT_NAME + '.exe').lower() or 'python' in name
+        return (pid, p.create_time()) if ok else None
+    except Exception:
+        return None
+
+
 def find_running():
-    """找出正在跑的机器人进程，返回 [(pid, 启动时间)]。"""
+    """找出正在跑的机器人进程，返回 [(pid, 启动时间)]。
+
+    先读 bot.pid（机器人启动时自己写，1ms）；读不到才扫进程 —— 带 cmdline
+    扫一遍全系统进程要 2 秒，每秒轮询一次会把界面卡死。
+    """
+    try:
+        pid = int((BOT_DIR / 'bot.pid').read_text(encoding='utf-8').strip())
+    except Exception:
+        pid = 0
+    if pid:
+        hit = _pid_hit(pid)
+        if hit:
+            return [hit]
     try:
         import psutil
     except Exception:
         return []
     hits = []
     exe_name = (BOT_NAME + '.exe').lower()
-    for p in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
+    for p in psutil.process_iter(['pid', 'name', 'create_time']):
         try:
             name = (p.info.get('name') or '').lower()
-            cmd = ' '.join(p.info.get('cmdline') or []).lower()
-            if name == exe_name or ('python' in name and 'bot.py' in cmd):
+            if name == exe_name:
                 hits.append((p.info['pid'], p.info.get('create_time') or 0))
+            elif 'python' in name:
+                # 只有 python 进程才值得去读命令行（数量很少）
+                cmd = ' '.join(p.cmdline() or []).lower()
+                if 'bot.py' in cmd:
+                    hits.append((p.info['pid'], p.info.get('create_time') or 0))
         except Exception:
             continue
     return hits
@@ -115,6 +163,8 @@ class Console:
         self._cmd, cwd, self._desc = locate_bot()
         self._cwd = cwd
         base = Path(cwd) if cwd else paths.ROOT
+        global BOT_DIR
+        BOT_DIR = base
         self.cfg_path = base / 'config.json'
         self.bot_log = base / 'bot.log'
         self.err_log = base / 'error.log'
@@ -125,6 +175,11 @@ class Console:
         self.cfg = {}
         self.vars = {}
         self.silent = False       # 开机自启时静默，不弹错误框
+        self._launch_at = 0.0     # 本次发起启动的时刻
+        self._ready_at = None     # 机器人打出「正在监听」的时刻
+        self._log_mark = 0        # 发起启动时 bot.log 的长度，用来只看新增内容
+        self._retries = 0         # 启动即退时自动重试次数
+        self._watch_id = None
 
         root.title(APP_TITLE)
         root.geometry('940x660')
@@ -140,7 +195,8 @@ class Console:
         self._build_tabs()
         self.ensure_config()
         self.load_config()
-        self.refresh_status()
+        # 先让窗口画出来，再去做进程探测（首次没有 bot.pid 时要扫进程，稍慢）
+        self.root.after(20, self.refresh_status)
         self._seek_tail()
         self.pump_log()
 
@@ -158,6 +214,7 @@ class Console:
         style.configure('Hint.TLabel', foreground='#666666')
         style.configure('Danger.TLabel', foreground='#c0392b')
         style.configure('Ok.TLabel', foreground='#1e8449')
+        style.configure('Warn.TLabel', foreground='#b9770e')
         style.configure('Big.TButton', padding=(14, 6))
 
     # ------------------------------------------------------------ 头部
@@ -301,7 +358,7 @@ class Console:
         entry_row(box, 3, '模型名', 'model')
         auto_var = tk.BooleanVar(value=get_autostart())
         self.vars['autostart'] = auto_var
-        ttk.Checkbutton(box, text='开机自动启动（登录后等 90 秒把机器人拉起来）',
+        ttk.Checkbutton(box, text='开机自动启动（登录后等微信起来，立即拉起机器人）',
                         variable=auto_var).grid(row=4, column=0, columnspan=3,
                                                 sticky='w', pady=(8, 2))
 
@@ -345,8 +402,50 @@ class Console:
     def is_running(self):
         return bool(self._last_pids)
 
+    def _detect_ready(self):
+        """bot.log 的新增内容里出现「正在监听」= 已能回消息。
+
+        只在本次启动写进去的部分里找，避免把上一次运行的日志当成这次就绪。
+        """
+        if self._ready_at is not None:
+            return True
+        try:
+            size = self.bot_log.stat().st_size
+        except OSError:
+            return False
+        if size <= self._log_mark:
+            return False
+        try:
+            with open(self.bot_log, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(max(self._log_mark, size - 200 * 1024))
+                chunk = f.read()
+        except OSError:
+            return False
+        if READY_MARK not in chunk:
+            return False
+        self._ready_at = time.time()
+        return True
+
+    def _boot_breakdown(self):
+        """读 bot.log 里「启动耗时」那行，原样带回给状态栏。"""
+        try:
+            with open(self.bot_log, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(max(0, self.bot_log.stat().st_size - 64 * 1024))
+                for line in f:
+                    if line.startswith('启动耗时'):
+                        return line.strip()
+        except OSError:
+            pass
+        return ''
+
     def refresh_status(self):
-        pids = find_running()
+        self._render(find_running())
+        self.root.after(POLL_MS, self.refresh_status)
+
+    def refresh_status_once(self):
+        self._render(find_running())
+
+    def _render(self, pids):
         self._last_pids = pids
         if pids:
             pid = pids[0][0]
@@ -355,13 +454,34 @@ class Console:
                 self._started = started
             up = fmt_duration(time.time() - self._started) if self._started else '—'
             extra = '（共 %d 个进程）' % len(pids) if len(pids) > 1 else ''
-            self.lbl_state.configure(text='●  运行中', style='Ok.TLabel')
-            self.lbl_meta.configure(text='PID %d%s · 已运行 %s' % (pid, extra, up))
+            ready = self._detect_ready()
+            if ready:
+                if self._launch_at and not getattr(self, '_told_ready', False):
+                    self._told_ready = True
+                    spent = max(0.0, self._ready_at - self._launch_at)
+                    self.system_log('--- 已就绪，从发起到可回消息 %.1f 秒' % spent)
+                    line = self._boot_breakdown()
+                    if line:
+                        self.system_log('    ' + line)
+                boot = ''
+                if self._launch_at and self._ready_at:
+                    boot = ' · 启动 %.1fs' % max(0.0, self._ready_at - self._launch_at)
+                self.lbl_state.configure(text='●  已就绪', style='Ok.TLabel')
+                self.lbl_meta.configure(text='PID %d%s%s · 已运行 %s'
+                                        % (pid, extra, boot, up))
+            else:
+                waiting = ''
+                if self._launch_at:
+                    waiting = ' · 已等 %.0fs' % (time.time() - self._launch_at)
+                self.lbl_state.configure(text='●  启动中', style='Warn.TLabel')
+                self.lbl_meta.configure(text='PID %d%s%s，正在注册监听…' % (pid, extra, waiting))
             self.btn_start.state(['disabled'])
             self.btn_stop.state(['!disabled'])
             self.btn_restart.state(['!disabled'])
         else:
             self._started = None
+            self._ready_at = None
+            self._told_ready = False
             self.lbl_state.configure(text='●  已停止', style='Danger.TLabel')
             self.lbl_meta.configure(text='点「启动」拉起机器人')
             self.btn_start.state(['!disabled'])
@@ -370,55 +490,109 @@ class Console:
         self.root.after(POLL_MS, self.refresh_status)
 
     def do_start(self):
-        if self.is_running():
+        if find_running():
             return
         cmd, cwd, desc = self._cmd, self._cwd, self._desc
         if not cmd:
             messagebox.showerror(APP_TITLE, desc)
             return
         try:
+            self._log_mark = self.bot_log.stat().st_size if self.bot_log.exists() else 0
+        except OSError:
+            self._log_mark = 0
+        try:
+            # 静默模式：失败别弹窗（弹一次阻塞 10 秒），交给下面自动重试
+            env = dict(os.environ, WECHAT_BOT_QUIET='1')
             if getattr(sys, 'frozen', False):
                 # 机器人 exe 自己会把输出写进 bot.log，不必再挂句柄
                 subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
-                                 creationflags=CREATE_NO_WINDOW)
+                                 env=env, creationflags=CREATE_NO_WINDOW)
             else:
                 out = open(self.bot_log, 'a', encoding='utf-8')
                 err = open(self.err_log, 'a', encoding='utf-8')
                 subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err,
                                  stdin=subprocess.DEVNULL,
-                                 creationflags=CREATE_NO_WINDOW)
+                                 env=env, creationflags=CREATE_NO_WINDOW)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, '启动失败：%s' % exc)
             return
+        self._launch_at = time.time()
+        self._ready_at = None
+        self._told_ready = False
         self.system_log('--- 已发起启动：%s' % desc)
         try:
             self._err_mark = self.err_log.stat().st_size if self.err_log.exists() else 0
         except OSError:
             self._err_mark = 0
-        self.root.after(3000, self._verify_started)
+        self.root.after(2000, self._watch_start)
 
-    def _verify_started(self):
-        fresh = ''
+    def _fresh_error(self):
         try:
             if self.err_log.exists() and self.err_log.stat().st_size > self._err_mark:
-                fresh = self.tail_text(self.err_log, 1200)
+                return self.tail_text(self.err_log, 1200)
         except OSError:
             pass
-        if find_running():
-            if fresh and not self.silent:
-                messagebox.showwarning(
-                    APP_TITLE,
-                    '机器人进程还在，但启动过程中报了错：\n\n' + fresh)
+        return ''
+
+    def _watch_start(self, attempt=0):
+        """盯着「启动中 → 已就绪」。中途退出就自动重试，别让人手点。"""
+        if self._detect_ready():
+            self._retries = 0
+            self.refresh_status_once()
             return
-        if not self.silent:
+        if find_running():
+            if attempt < 60:            # 最长约 2 分半，DB 很大时也够
+                self.root.after(2500, lambda: self._watch_start(attempt + 1))
+            return
+        # 进程已经不在了 —— 启动即退
+        fresh = self._fresh_error()
+        permanent = ('config.json' in fresh) or ('secret.txt' in fresh)
+        # 微信还没登录完 / 库还没就绪：这种继续等就会自己好，值得多等一会
+        waiting_wechat = ('无法确定唯一' in fresh) or ('未找到微信数据库' in fresh
+                                                      or '没有找到指定群聊' in fresh)
+        cap = 45 if waiting_wechat else RETRY_MAX      # 45 × 8s ≈ 6 分钟
+        if not permanent and self._retries < cap:
+            self._retries += 1
+            self.system_log('--- 启动后退出，%d 秒后自动重试（第 %d/%d 次）：%s'
+                            % (RETRY_GAP, self._retries, cap,
+                               (fresh.strip().splitlines() or [''])[0][:80]))
+            self.root.after(int(RETRY_GAP * 1000), self.do_start)
+            return
+        if fresh and not self.silent:
             messagebox.showwarning(
                 APP_TITLE,
-                '机器人启动后立刻退出了。\n\n最近错误日志：\n' + (fresh or '（空）'))
+                '机器人启动后立刻退出了。\n\n最近错误日志：\n' + fresh)
+        elif not self.silent:
+            messagebox.showwarning(
+                APP_TITLE, '机器人启动后立刻退出了，error.log 里没有内容。')
 
     def autostart_launch(self):
-        """开机自启：等微信起来后再拉起机器人。"""
-        if not find_running():
-            self.do_start()
+        """开机自启：等微信起来就拉起机器人，不再固定干等。"""
+        if find_running():
+            return
+        self.do_start()
+
+    def autostart_watch(self, tick=0):
+        """开机自启的等待逻辑：轮询微信进程，起来了就立刻拉起机器人。
+
+        以前是固定等 90 秒 —— 微信 12 秒就起来了也得白等 78 秒。改成轮询后，
+        开机到能回消息的时间基本只等于「微信启动 + 机器人自己那几秒」。
+        """
+        if find_running():
+            return
+        if wechat_started():
+            if tick == 0:
+                return self.root.after(1500, lambda: self.autostart_watch(tick + 1))
+            self.system_log('--- 检测到微信已启动，稍候拉起机器人')
+            self.root.after(1500, self.autostart_launch)
+            return
+        if tick == 0:
+            self.system_log('--- 开机自启：等微信启动，就绪后立即拉起（最多等 15 分钟）')
+        if tick >= 450:
+            self.system_log('--- 等微信超过 15 分钟，先拉起机器人试试')
+            self.root.after(500, self.autostart_launch)
+            return
+        self.root.after(2000, lambda: self.autostart_watch(tick + 1))
 
     def do_stop(self):
         pids = find_running()
@@ -434,24 +608,6 @@ class Console:
                 pass
         self.system_log('--- 已停止 %d 个进程' % len(pids))
         self.root.after(1200, lambda: self.refresh_status_once())
-
-    def refresh_status_once(self):
-        pids = find_running()
-        self._last_pids = pids
-        if pids:
-            pid = pids[0][0]
-            self.lbl_state.configure(text='●  运行中', style='Ok.TLabel')
-            self.lbl_meta.configure(text='PID %d' % pid)
-            self.btn_start.state(['disabled'])
-            self.btn_stop.state(['!disabled'])
-            self.btn_restart.state(['!disabled'])
-        else:
-            self._started = None
-            self.lbl_state.configure(text='●  已停止', style='Danger.TLabel')
-            self.lbl_meta.configure(text='点「启动」拉起机器人')
-            self.btn_start.state(['!disabled'])
-            self.btn_stop.state(['disabled'])
-            self.btn_restart.state(['disabled'])
 
     def do_restart(self):
         pids = find_running()
@@ -657,7 +813,7 @@ def main():
             root.iconify()          # 开机自启时缩到任务栏，不挡桌面
         except Exception:
             pass
-        root.after(90 * 1000, app.autostart_launch)
+        root.after(300, app.autostart_watch)
     root.mainloop()
 
 

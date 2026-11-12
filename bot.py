@@ -9,13 +9,41 @@ import threading
 from collections import deque
 from pathlib import Path
 
+# ---- 启动耗时探针 ----
+# 「从双击到能回消息」慢在哪一段，只能靠实测。每次启动覆盖写 boot.log，
+# 只记各阶段相对模块加载起点的毫秒数，不含任何消息内容。
+_BOOT_T = time.perf_counter()
+_BOOT_WALL = time.time()
+
+
+def boot_mark(label):
+    """记一个阶段耗时点，写在 boot.log（失败静默，绝不影响启动）。"""
+    try:
+        line = '%-16s %7.3fs  %s\n' % (label, time.perf_counter() - _BOOT_T,
+                                       time.strftime('%H:%M:%S'))
+        with open(paths.ROOT / 'boot.log', 'a', encoding='utf-8') as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+try:
+    (paths.ROOT / 'boot.log').write_text(
+        '# 本次启动 %s，模块内计时从「Python 开始执行 bot 代码」算起\n'
+        % time.strftime('%Y-%m-%d %H:%M:%S'), encoding='utf-8')
+except Exception:
+    pass
+boot_mark('import-stdlib')
+
 import requests
 import random
+boot_mark('import-requests')
 
 import sticker    # 本地表情包模块（[[sticker:分类]] 机制）
 import vision     # 收到表情包的识图预处理（CDN 回源 -> data URL）
 import voice      # 真·语音气泡（虚拟声卡录制链路，实现见 voice.py）
 import proactive  # 主动发消息（空闲时自己挑个会话开口）
+boot_mark('import-local')
 
 ROOT = paths.ROOT
 ACCOUNT_CACHE = ROOT / '.account_cache.json'
@@ -295,9 +323,28 @@ def locate_account(group: str, fast: bool = True):
                        + ('（试探：' + '；'.join(errors[:3]) + '）' if errors else ''))
 
 
+def _wechat_alive():
+    """微信进程在不在。没有它 UIA 一定摸不到窗口，预热只是白等。"""
+    try:
+        import psutil
+        for p in psutil.process_iter(['name']):
+            if (p.info.get('name') or '').lower() in ('weixin.exe', 'wechat.exe'):
+                return True
+    except Exception:
+        return True          # 探测不了就照常预热，宁可慢也别漏
+    return False
+
+
 def warmup_gui():
     """后台预热 GUI/UIA，让第一条消息不必临场热激活与布局校准。"""
     try:
+        if not _wechat_alive():
+            # 微信没起来时 _get_uia() 会反复重试十几秒才回退 OCR，纯白等。
+            # 这时跳过，第一条消息要用到时再现场初始化（并靠控制台重试兜底）。
+            print('GUI 预热跳过：微信进程还没起来，等它起来后发送时会自动初始化。',
+                  flush=True)
+            boot_mark('gui-skip')
+            return
         from wechatauto.guia import WeChatGUI
         gui = WeChatGUI()
         _GUI_CACHE['gui'] = gui
@@ -306,6 +353,7 @@ def warmup_gui():
         except Exception:
             pass
         print('GUI/UIA 预热完成。', flush=True)
+        boot_mark('gui-warm')
     except Exception as exc:
         print('[警告] GUI 预热失败（不影响运行）：' + str(exc),
               file=sys.stderr, flush=True)
@@ -421,6 +469,7 @@ def get_key():
 
 def main():
     from wechatauto import WeChat
+    boot_mark('import-wechatauto')
     t_boot = time.perf_counter()
     cfg_file = ROOT / 'config.json'
     if not cfg_file.is_file():
@@ -446,6 +495,7 @@ def main():
     group, name = config['group_name'].strip(), config['bot_name'].strip()
     if not group or (config['trigger'] == 'mention' and not name):
         raise RuntimeError('请先在 config.json 填写群名和机器人群昵称。')
+    boot_mark('config-ok')
     key = get_key()
     history_size = max(0, int(config.get('history_messages', 12)))
     histories = {}  # 按会话隔离上下文，避免群聊与不同私聊之间串味
@@ -455,6 +505,7 @@ def main():
     db, resolved, account = locate_account(
         group, fast=bool(startup_cfg.get('fast_account', True)))
     locate_ms = (time.perf_counter() - t_locate) * 1000
+    boot_mark('locate-db')
     # 私聊白名单：空列表 = 完全不回复私聊。名字必须是微信备注/昵称的精确匹配。
     private_targets = {}
     for nickname in private_chats:
@@ -471,6 +522,7 @@ def main():
     sticker_on = bool(scfg.get('enabled', False))
     sticker_root = scfg.get('dir', r'D:\Bots\LegacyVoice\data\stickers')
     sticker_lib = sticker.load_library(sticker_root) if sticker_on else {}
+    boot_mark('sticker-lib')
     sticker_chance = max(0.0, min(1.0, float(scfg.get('chance', 0.25))))
     sticker_recent_n = max(1, int(scfg.get('recent', 10)))
     sticker_fast = bool(scfg.get('fast', True))
@@ -503,6 +555,11 @@ def main():
         if not sticker_lib:
             print('[警告] 表情包目录为空或不存在，本轮不会发图', file=sys.stderr, flush=True)
     wc = WeChat(db=db)
+    boot_mark('wechat-init')
+    if startup_cfg.get('warmup_gui', True):
+        # UIA 预热和下面的监听注册并行：预热摸的是窗口与控件树，注册只是读库，
+        # 两者互不依赖。串起来做等于让「就绪」白等预热的几秒。
+        threading.Thread(target=warmup_gui, daemon=True).start()
     started_at = int(time.time())
     self_id = db.get_self_info()['username']
     # 主线程最后一次处理消息的时间。主动发消息会抢微信窗口焦点，所以只要这边
@@ -828,10 +885,14 @@ def main():
             ok_private.append(nickname)
             print(f'私聊监听已注册：{nickname}', flush=True)
     print(f'正在监听 {registered} 个会话（群聊 1 / 私聊 {registered - 1}），按 Ctrl+C 退出。', flush=True)
-    boot_ms = (time.perf_counter() - t_boot) * 1000
+    boot_mark('listeners')
+    boot_mark('ready')
+    now = time.perf_counter()
+    load_ms = (t_boot - _BOOT_T) * 1000          # 模块导入（含 exe 引导后加载）
+    work_ms = (now - t_boot) * 1000              # 定位账号 + 注册监听
     fast_acc = bool(startup_cfg.get('fast_account', True))
-    print(f'启动耗时 {boot_ms:.0f}ms（账号定位/DB快照 {locate_ms:.0f}ms，快速账号={fast_acc}）',
-          flush=True)
+    print(f'启动耗时 {(now - _BOOT_T):.1f}s（导入 {load_ms:.0f}ms + 账号定位 {locate_ms:.0f}ms'
+          f' + 注册监听 {work_ms - locate_ms:.0f}ms，快速账号={fast_acc}）', flush=True)
     current_chance('', sticker_chance)   # 启动时打印一次当前生效的概率
     voice_cfg = voice.read_config(ROOT / 'config.json')
     if voice_cfg.get('enabled'):
@@ -842,8 +903,8 @@ def main():
         print('语音引擎：' + eng, flush=True)
         print('语音依赖：' + (label if not miss else '缺失 → ' + '、'.join(miss)), flush=True)
     if startup_cfg.get('warmup_gui', True):
-        # 后台预热 GUI/UIA，不阻塞监听与启动弹窗；首条消息不必临场热激活
-        threading.Thread(target=warmup_gui, daemon=True).start()
+        # 预热线程已在 WeChat() 之后并行启动，这里不再重复拉起
+        pass
 
     # ---- 主动发消息 ----
     # 设计见 proactive.py：所有闸门都只是「本轮跳过」，任何异常都不会让线程退出。
@@ -1026,12 +1087,21 @@ if __name__ == '__main__':
             msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             raise RuntimeError('机器人已经运行，请勿重复启动。')
+        # 给控制台留个快捷方式：读 bot.pid 只要 1ms，否则它得扫一遍全系统进程
+        try:
+            (ROOT / 'bot.pid').write_text(str(os.getpid()), encoding='utf-8')
+        except OSError:
+            pass
         main()
     except KeyboardInterrupt:
         print('\n已停止。')
     except Exception as exc:
         reason = str(exc)
         print('启动失败：' + reason, file=sys.stderr)
+        # 由控制台拉起时（WECHAT_BOT_QUIET=1）不弹窗：弹窗会阻塞 10 秒才退出，
+        # 而控制台那边本来就要自动重试，再弹十次窗只会刷屏抢焦点。
+        if os.environ.get('WECHAT_BOT_QUIET') == '1':
+            sys.exit(1)
         if '已经运行' in reason:
             notify('微信机器人', '机器人已经在运行，无需重复启动。\n\n查看状态可双击 查看状态.bat', wait=True)
         else:

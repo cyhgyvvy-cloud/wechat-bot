@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""控制台打包配置：单文件 exe，双击即开。"""
+"""控制台打包配置（PyInstaller）。
+
+目录模式而不是单文件：单文件每次启动都要把 10MB 解压到 %TEMP%，
+实测窗口出现要 5 秒；目录模式约 0.6 秒。运行库放在 _console 子目录，
+不和机器人本体的 _internal 抢名字。
+"""
 
 a = Analysis(
     ['console.py'],
@@ -20,9 +25,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='机器人控制台',
     debug=False,
     bootloader_ignore_signals=False,
@@ -37,4 +41,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+    contents_directory='_console',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='机器人控制台',
 )

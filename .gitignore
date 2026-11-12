@@ -22,6 +22,8 @@ cache/
 wechatauto_logs/
 bot.lock
 bot.pid
+boot.log
+boot.log.*
 bot.log
 bot.log.*
 error.log
