@@ -427,16 +427,17 @@ class Console:
         return True
 
     def _boot_breakdown(self):
-        """读 bot.log 里「启动耗时」那行，原样带回给状态栏。"""
+        """读 bot.log 里最后一处「启动耗时」那行，原样带给状态栏。"""
+        last = ''
         try:
             with open(self.bot_log, 'r', encoding='utf-8', errors='ignore') as f:
                 f.seek(max(0, self.bot_log.stat().st_size - 64 * 1024))
                 for line in f:
                     if line.startswith('启动耗时'):
-                        return line.strip()
+                        last = line.strip()
         except OSError:
             pass
-        return ''
+        return last
 
     def refresh_status(self):
         self._render(find_running())
