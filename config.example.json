@@ -14,12 +14,18 @@
   "notify_on_start": true,
   "memory": {
     "enabled": true,
+    "mode": "diary",
     "db": "cache/memory.db",
-    "keep_messages": 60,
+    "keep_messages": 400,
     "max_facts": 120,
-    "recall_limit": 6,
+    "recall_limit": 4,
     "extract_every": 16,
-    "extract_min_gap": 180
+    "extract_min_gap": 180,
+    "diary_min_msgs": 12,
+    "diary_max_items": 6,
+    "diary_item_chars": 36,
+    "diary_budget": 150,
+    "diary_input_budget": 6000
   },
   "startup": {
     "fast_account": true,

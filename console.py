@@ -371,15 +371,19 @@ class Console:
                 when = time.strftime('%m-%d %H:%M', time.localtime(f['ts']))
             except Exception:
                 when = ''
+            text = f['text']
+            if f.get('kind') == 'diary':
+                text = '[日记] ' + text
             self.mem_tree.insert('', 'end', iid=str(f['id']),
                                  values=(when, f['chat'], f['subject'] or '—',
-                                         f['text'], f['uses']))
+                                         text, f['uses']))
         names = ['全部'] + memstore.chats()
         self.mem_combo.configure(values=names)
         if self.mem_chat.get() not in names:
             self.mem_chat.set('全部')
-        tip = '共 %d 条记忆（显示 %d 条）· 历史对话 %d 条 · %s' % (
-            st.get('facts', 0), len(rows), st.get('messages', 0), st.get('path', ''))
+        tip = '共 %d 条记忆（日记 %d 条，显示 %d 条）· 历史对话 %d 条 · %s' % (
+            st.get('facts', 0), st.get('diary', 0), len(rows),
+            st.get('messages', 0), st.get('path', ''))
         self.lbl_mem.configure(text=tip)
 
     def del_memory(self):
@@ -513,12 +517,15 @@ class Console:
         # 记忆
         box = section('记忆')
         check_row(box, 0, '启用记忆（重启生效）', 'memory_enabled')
-        entry_row(box, 1, '每个会话保留历史', 'memory_keep', '条，重启生效')
-        entry_row(box, 2, '长期记忆上限', 'memory_max_facts', '条/会话')
-        entry_row(box, 3, '每次回忆', 'memory_recall', '条')
-        entry_row(box, 4, '整理频率', 'memory_every', '条消息总结一次')
+        check_row(box, 1, '按日记方式整理（每天一次，更省钱）', 'memory_diary')
+        entry_row(box, 2, '每个会话保留历史', 'memory_keep', '条，重启生效')
+        entry_row(box, 3, '长期记忆上限', 'memory_max_facts', '条/会话')
+        entry_row(box, 4, '每次回忆', 'memory_recall', '条')
+        entry_row(box, 5, '整理门槛', 'memory_every', '条消息才整理一次')
+        ttk.Label(box, text='取消日记＝旧的事实卡片模式；日记片段压到 150 字内并按相关度召回。',
+                  style='Hint.TLabel').grid(row=6, column=0, columnspan=2, sticky='w')
         ttk.Label(box, text='记忆存在 cache/memory.db，可在「记忆」页查看和删除。',
-                  style='Hint.TLabel').grid(row=5, column=0, columnspan=2, sticky='w')
+                  style='Hint.TLabel').grid(row=7, column=0, columnspan=2, sticky='w')
 
     def _build_status(self):
         bar = ttk.Frame(self.root, padding=(16, 0, 16, 10))
@@ -879,11 +886,14 @@ class Console:
         self.vars['active_hours'].set(pr.get('active_hours', ''))
 
         me = self.cfg.get('memory') or {}
+        diary = str(me.get('mode', 'diary')) == 'diary'
         self.vars['memory_enabled'].set(bool(me.get('enabled', True)))
-        self.vars['memory_keep'].set(str(me.get('keep_messages', 60)))
+        self.vars['memory_diary'].set(diary)
+        self.vars['memory_keep'].set(str(me.get('keep_messages', 400 if diary else 60)))
         self.vars['memory_max_facts'].set(str(me.get('max_facts', 120)))
-        self.vars['memory_recall'].set(str(me.get('recall_limit', 6)))
-        self.vars['memory_every'].set(str(me.get('extract_every', 16)))
+        self.vars['memory_recall'].set(str(me.get('recall_limit', 4 if diary else 6)))
+        self.vars['memory_every'].set(str(me.get(
+            'diary_min_msgs' if diary else 'extract_every', 12 if diary else 16)))
 
         self.lbl_save.configure(text='已载入', style='Ok.TLabel')
 
@@ -915,13 +925,17 @@ class Console:
 
         me = cfg.setdefault('memory', {})
         me['enabled'] = bool(self.vars['memory_enabled'].get())
-        for key, name, lo, hi in (('memory_keep', 'keep_messages', 6, 400),
+        me['mode'] = 'diary' if bool(self.vars['memory_diary'].get()) else 'fact'
+        for key, name, lo, hi in (('memory_keep', 'keep_messages', 6, 2000),
                                   ('memory_max_facts', 'max_facts', 10, 2000),
-                                  ('memory_recall', 'recall_limit', 1, 20),
-                                  ('memory_every', 'extract_every', 4, 500)):
+                                  ('memory_recall', 'recall_limit', 1, 20)):
             raw = str(self.vars[key].get()).strip()
             if raw.isdigit():
                 me[name] = max(lo, min(hi, int(raw)))
+        # 两种模式共用一个门槛数字，切换时不至于留着旧值
+        raw = str(self.vars['memory_every'].get()).strip()
+        if raw.isdigit():
+            me['extract_every'] = me['diary_min_msgs'] = max(4, min(500, int(raw)))
         me.setdefault('db', 'cache/memory.db')
 
         try:

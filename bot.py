@@ -500,20 +500,29 @@ def main():
     key = get_key()
     history_size = max(0, int(config.get('history_messages', 12)))
     # ---- 记忆 ----
-    # 两层：会话历史落盘（重启接着聊）+ 长期事实（模型自己总结，回答前按相关度回忆）。
+    # 两层：会话历史落盘（重启接着聊）+ 长期记忆（日记片段或事实卡片，按相关度召回）。
     # 历史条数沿用 history_messages；长期记忆是另一套容量，互不影响。
     mem_cfg = config.get('memory') or {}
     mem_on = bool(mem_cfg.get('enabled', True))
-    mem_keep = max(history_size, int(mem_cfg.get('keep_messages', 60) or 60))
-    mem_every = max(4, int(mem_cfg.get('extract_every', 16) or 16))
     if mem_on:
         memstore.configure(ROOT, mem_cfg)
+    mem_diary = mem_on and memstore.diary_mode()
+    keep_default = 400 if mem_diary else 60       # 按天归档要能回看一整天
+    mem_keep = max(history_size,
+                   int(mem_cfg.get('keep_messages', keep_default) or keep_default))
+    mem_every = max(4, int(mem_cfg.get('extract_every', 16) or 16))
+    mem_trigger = (max(4, int(mem_cfg.get('diary_min_msgs', 12) or 12))
+                   if mem_diary else mem_every)
+    if mem_on:
         _st = memstore.stats()
-        print('记忆：已启用（历史 %d 条/会话，长期 %d 条/会话，每 %d 条消息整理一次）'
-              % (mem_keep, int(mem_cfg.get('max_facts', 120) or 120), mem_every),
+        how = ('日记模式：每会话每天最多写一次，攒够 %d 条触发' % mem_trigger
+               if mem_diary else '事实卡片模式：每 %d 条消息整理一次' % mem_every)
+        print('记忆：已启用（%s，历史 %d 条/会话，长期 %d 条/会话）'
+              % (how, mem_keep, int(mem_cfg.get('max_facts', 120) or 120)),
               flush=True)
-        print('      已有 %d 条记忆、%d 条历史，库：%s'
-              % (_st['facts'], _st['messages'], _st['path']), flush=True)
+        print('      已有 %d 条记忆（其中日记 %d 条）、%d 条历史，库：%s'
+              % (_st['facts'], _st.get('diary', 0), _st['messages'], _st['path']),
+              flush=True)
     else:
         print('记忆：未启用（config.json → memory.enabled）', flush=True)
     histories = {}  # 按会话隔离上下文，避免群聊与不同私聊之间串味
@@ -618,16 +627,19 @@ def main():
     MEM_LOCK = threading.Lock()
 
     def mem_extract_later(chat_name):
-        """后台整理长期记忆。跑在单独线程里，失败最多丢一条记忆，不影响聊天。"""
+        """后台整理记忆。日记模式按天写，事实模式按条抽；失败不影响聊天。"""
         def _run():
             if not MEM_LOCK.acquire(blocking=False):
                 return
             try:
-                memstore.maybe_extract(
-                    chat_name,
-                    lambda msgs: chat_completion(config, key, msgs,
-                                                 timeout=60, attempts=1),
-                    log_fn=print)
+                def call_llm(msgs):
+                    return chat_completion(config, key, msgs,
+                                           timeout=90 if mem_diary else 60,
+                                           attempts=1)
+                if mem_diary:
+                    memstore.maybe_diary(chat_name, call_llm, log_fn=print)
+                else:
+                    memstore.maybe_extract(chat_name, call_llm, log_fn=print)
             except Exception as exc:
                 print(f'[记忆] 整理异常（忽略）：{type(exc).__name__}: {exc}',
                       flush=True)
@@ -904,7 +916,10 @@ def main():
                     memstore.log(chat_name, 'user', user_note,
                                  '' if is_private else speaker_of(sender))
                     memstore.log(chat_name, 'assistant', answer or '[表情包]')
-                    if memstore.bump(chat_name) >= mem_every:
+                    n_pending = memstore.bump(chat_name)
+                    # 日记一天只写一次；写完后当天别再为每条消息起空线程
+                    if (n_pending >= mem_trigger
+                            and (not mem_diary or not memstore.diary_done_today(chat_name))):
                         mem_extract_later(chat_name)
                 except Exception as exc:
                     print(f'[记忆] 写入失败（忽略）：{type(exc).__name__}: {exc}',
