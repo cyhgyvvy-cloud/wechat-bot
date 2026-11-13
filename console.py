@@ -20,6 +20,7 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 import paths
+import memstore
 
 APP_TITLE = '微信机器人 · 控制台'
 BOT_NAME = '微信机器人'
@@ -281,6 +282,126 @@ class Console:
         self.cfg_page = page_cfg
         self._build_config(page_cfg)
 
+        # ---- 记忆页
+        page_mem = ttk.Frame(nb, padding=8)
+        nb.add(page_mem, text='  记忆  ')
+        self.mem_page = page_mem
+        self._build_memory(page_mem)
+        nb.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+
+    def _on_tab_changed(self, _event=None):
+        """切到记忆页时重新读一次库：机器人那边随时可能在写。"""
+        try:
+            if self.nb.index('current') == 2:
+                self.refresh_memory()
+        except Exception:
+            pass
+
+    def _build_memory(self, parent):
+        bar = ttk.Frame(parent)
+        bar.pack(fill='x', pady=(0, 4))
+        ttk.Label(bar, text='会话', style='Hint.TLabel').pack(side='left')
+        self.mem_chat = tk.StringVar(value='全部')
+        self.mem_combo = ttk.Combobox(bar, textvariable=self.mem_chat, width=14,
+                                      state='readonly')
+        self.mem_combo.pack(side='left', padx=(6, 10))
+        self.mem_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh_memory())
+        ttk.Label(bar, text='搜索', style='Hint.TLabel').pack(side='left')
+        self.mem_search = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=self.mem_search, width=14)
+        ent.pack(side='left', padx=(6, 6))
+        ent.bind('<Return>', lambda e: self.refresh_memory())
+        ttk.Button(bar, text='查找', command=self.refresh_memory).pack(side='left')
+        ttk.Button(bar, text='刷新', command=self.refresh_memory).pack(side='left', padx=(6, 0))
+
+        # 单独一行放危险操作，避免和表格抢宽度被挤出窗口
+        bar2 = ttk.Frame(parent)
+        bar2.pack(fill='x', pady=(0, 6))
+        ttk.Button(bar2, text='清空…', command=self.clear_memory).pack(side='right')
+        ttk.Button(bar2, text='删除所选', command=self.del_memory).pack(side='right', padx=(0, 6))
+        ttk.Label(bar2, text='选中一行或多行后可删除；清空是按当前会话来的',
+                  style='Hint.TLabel').pack(side='left')
+
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill='both', expand=True)
+        cols = ('ts', 'chat', 'who', 'text', 'uses')
+        self.mem_tree = ttk.Treeview(wrap, columns=cols, show='headings',
+                                     selectmode='extended', height=12)
+        heads = (('ts', '时间', 92, 'center'),
+                 ('chat', '会话', 92, 'w'),
+                 ('who', '谁', 72, 'w'),
+                 ('text', '记住了什么', 330, 'w'),
+                 ('uses', '用到', 44, 'center'))
+        for key, title, width, anchor in heads:
+            self.mem_tree.heading(key, text=title)
+            self.mem_tree.column(key, width=width, anchor=anchor,
+                                 stretch=(key == 'text'))
+        sb = ttk.Scrollbar(wrap, orient='vertical', command=self.mem_tree.yview)
+        self.mem_tree.configure(yscrollcommand=sb.set)
+        self.mem_tree.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+
+        self.lbl_mem = ttk.Label(parent, text='', style='Hint.TLabel')
+        self.lbl_mem.pack(fill='x', pady=(6, 0))
+        self.refresh_memory()
+
+    # ------------------------------------------------------------ 记忆操作
+    def _mem_ready(self):
+        """把记忆库指向机器人所在目录，并返回是否可用。"""
+        try:
+            memstore.configure(BOT_DIR, (self.cfg or {}).get('memory') or {})
+            return memstore.enabled(), memstore.stats()
+        except Exception as exc:
+            self.lbl_mem.configure(text='记忆库读取失败：%s' % exc)
+            return False, {}
+
+    def refresh_memory(self):
+        if not hasattr(self, 'mem_tree'):
+            return
+        ok, st = self._mem_ready()
+        self.mem_tree.delete(*self.mem_tree.get_children())
+        if not ok:
+            self.lbl_mem.configure(text='记忆未启用（配置 → 记忆 → 启用记忆 勾上并保存）')
+            return
+        chat = self.mem_chat.get()
+        chat = '' if chat in ('全部', '') else chat
+        rows = memstore.facts(chat, self.mem_search.get().strip())
+        for f in rows:
+            try:
+                when = time.strftime('%m-%d %H:%M', time.localtime(f['ts']))
+            except Exception:
+                when = ''
+            self.mem_tree.insert('', 'end', iid=str(f['id']),
+                                 values=(when, f['chat'], f['subject'] or '—',
+                                         f['text'], f['uses']))
+        names = ['全部'] + memstore.chats()
+        self.mem_combo.configure(values=names)
+        if self.mem_chat.get() not in names:
+            self.mem_chat.set('全部')
+        tip = '共 %d 条记忆（显示 %d 条）· 历史对话 %d 条 · %s' % (
+            st.get('facts', 0), len(rows), st.get('messages', 0), st.get('path', ''))
+        self.lbl_mem.configure(text=tip)
+
+    def del_memory(self):
+        sel = self.mem_tree.selection()
+        if not sel:
+            return
+        if not messagebox.askyesno(APP_TITLE, '删除选中的 %d 条记忆？' % len(sel)):
+            return
+        n = sum(1 for i in sel if memstore.delete_fact(int(i)))
+        self.refresh_memory()
+        self.system_log('--- 已删除 %d 条记忆' % n)
+
+    def clear_memory(self):
+        chat = self.mem_chat.get()
+        chat = '' if chat in ('全部', '') else chat
+        what = ('「%s」的全部记忆和对话历史' % chat) if chat else '所有会话的记忆和对话历史'
+        if not messagebox.askyesno(APP_TITLE, '确定清空%s？\n\n清空后机器人就不记得这些事了。' % what):
+            return
+        n = memstore.clear(chat)
+        self.refresh_memory()
+        self.system_log('--- 已清空 %d 条记忆（%s）' % (n, chat or '全部'))
+
     def _build_config(self, parent):
         # 操作栏固定在底部，不随内容滚动
         bar = ttk.Frame(parent, padding=(6, 10, 6, 2))
@@ -388,6 +509,16 @@ class Console:
         box = section('主动发消息')
         check_row(box, 0, '启用主动发消息', 'proactive_enabled')
         entry_row(box, 1, '活跃时段', 'active_hours', '如 08:30-23:00')
+
+        # 记忆
+        box = section('记忆')
+        check_row(box, 0, '启用记忆（重启生效）', 'memory_enabled')
+        entry_row(box, 1, '每个会话保留历史', 'memory_keep', '条，重启生效')
+        entry_row(box, 2, '长期记忆上限', 'memory_max_facts', '条/会话')
+        entry_row(box, 3, '每次回忆', 'memory_recall', '条')
+        entry_row(box, 4, '整理频率', 'memory_every', '条消息总结一次')
+        ttk.Label(box, text='记忆存在 cache/memory.db，可在「记忆」页查看和删除。',
+                  style='Hint.TLabel').grid(row=5, column=0, columnspan=2, sticky='w')
 
     def _build_status(self):
         bar = ttk.Frame(self.root, padding=(16, 0, 16, 10))
@@ -747,6 +878,13 @@ class Console:
         self.vars['proactive_enabled'].set(bool(pr.get('enabled')))
         self.vars['active_hours'].set(pr.get('active_hours', ''))
 
+        me = self.cfg.get('memory') or {}
+        self.vars['memory_enabled'].set(bool(me.get('enabled', True)))
+        self.vars['memory_keep'].set(str(me.get('keep_messages', 60)))
+        self.vars['memory_max_facts'].set(str(me.get('max_facts', 120)))
+        self.vars['memory_recall'].set(str(me.get('recall_limit', 6)))
+        self.vars['memory_every'].set(str(me.get('extract_every', 16)))
+
         self.lbl_save.configure(text='已载入', style='Ok.TLabel')
 
     def _set_scale(self, key, value):
@@ -774,6 +912,17 @@ class Console:
         cfg['voice']['chance'] = round(self.vars['voice_chance'].get() / 100.0, 3)
         cfg.setdefault('proactive', {})['enabled'] = bool(self.vars['proactive_enabled'].get())
         cfg['proactive']['active_hours'] = self.vars['active_hours'].get().strip()
+
+        me = cfg.setdefault('memory', {})
+        me['enabled'] = bool(self.vars['memory_enabled'].get())
+        for key, name, lo, hi in (('memory_keep', 'keep_messages', 6, 400),
+                                  ('memory_max_facts', 'max_facts', 10, 2000),
+                                  ('memory_recall', 'recall_limit', 1, 20),
+                                  ('memory_every', 'extract_every', 4, 500)):
+            raw = str(self.vars[key].get()).strip()
+            if raw.isdigit():
+                me[name] = max(lo, min(hi, int(raw)))
+        me.setdefault('db', 'cache/memory.db')
 
         try:
             if self.cfg_path.exists():

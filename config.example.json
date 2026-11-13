@@ -12,6 +12,15 @@
   ],
   "private_trigger": "inherit",
   "notify_on_start": true,
+  "memory": {
+    "enabled": true,
+    "db": "cache/memory.db",
+    "keep_messages": 60,
+    "max_facts": 120,
+    "recall_limit": 6,
+    "extract_every": 16,
+    "extract_min_gap": 180
+  },
   "startup": {
     "fast_account": true,
     "warmup_gui": true

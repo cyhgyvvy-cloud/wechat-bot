@@ -43,6 +43,7 @@ import sticker    # 本地表情包模块（[[sticker:分类]] 机制）
 import vision     # 收到表情包的识图预处理（CDN 回源 -> data URL）
 import voice      # 真·语音气泡（虚拟声卡录制链路，实现见 voice.py）
 import proactive  # 主动发消息（空闲时自己挑个会话开口）
+import memstore   # 记忆：会话上下文持久化 + 长期事实（cache/memory.db）
 boot_mark('import-local')
 
 ROOT = paths.ROOT
@@ -498,6 +499,23 @@ def main():
     boot_mark('config-ok')
     key = get_key()
     history_size = max(0, int(config.get('history_messages', 12)))
+    # ---- 记忆 ----
+    # 两层：会话历史落盘（重启接着聊）+ 长期事实（模型自己总结，回答前按相关度回忆）。
+    # 历史条数沿用 history_messages；长期记忆是另一套容量，互不影响。
+    mem_cfg = config.get('memory') or {}
+    mem_on = bool(mem_cfg.get('enabled', True))
+    mem_keep = max(history_size, int(mem_cfg.get('keep_messages', 60) or 60))
+    mem_every = max(4, int(mem_cfg.get('extract_every', 16) or 16))
+    if mem_on:
+        memstore.configure(ROOT, mem_cfg)
+        _st = memstore.stats()
+        print('记忆：已启用（历史 %d 条/会话，长期 %d 条/会话，每 %d 条消息整理一次）'
+              % (mem_keep, int(mem_cfg.get('max_facts', 120) or 120), mem_every),
+              flush=True)
+        print('      已有 %d 条记忆、%d 条历史，库：%s'
+              % (_st['facts'], _st['messages'], _st['path']), flush=True)
+    else:
+        print('记忆：未启用（config.json → memory.enabled）', flush=True)
     histories = {}  # 按会话隔离上下文，避免群聊与不同私聊之间串味
     private_chats = [str(x).strip() for x in config.get('private_chats', []) if str(x).strip()]
     startup_cfg = config.get('startup') or {}
@@ -565,6 +583,59 @@ def main():
     # 主线程最后一次处理消息的时间。主动发消息会抢微信窗口焦点，所以只要这边
     # 刚有动静就先让路，避免「回复到一半被自己的主动消息打断」。
     ACTIVITY = {'ts': 0.0}
+
+    # ---- 记忆相关的小工具 ----
+    SPEAKER = {}
+
+    def speaker_of(wxid):
+        """wxid -> 备注/昵称。总结记忆时要写「谁说的」，不能只有内容。"""
+        if not wxid:
+            return ''
+        if wxid not in SPEAKER:
+            try:
+                SPEAKER[wxid] = str(db.get_nickname(wxid) or '')
+            except Exception:
+                SPEAKER[wxid] = ''
+        return SPEAKER[wxid]
+
+    def history_of(chat_name):
+        """取会话历史；第一次用到时从库里恢复，重启后不会立刻失忆。"""
+        h = histories.get(chat_name)
+        if h is None:
+            seeded = []
+            if mem_on and history_size:
+                try:
+                    seeded = memstore.history(chat_name, history_size)
+                except Exception:
+                    seeded = []
+            h = deque(seeded, maxlen=history_size)
+            histories[chat_name] = h
+            if seeded:
+                print(f'记忆：已恢复「{chat_name}」最近 {len(seeded)} 条对话上下文',
+                      flush=True)
+        return h
+
+    MEM_LOCK = threading.Lock()
+
+    def mem_extract_later(chat_name):
+        """后台整理长期记忆。跑在单独线程里，失败最多丢一条记忆，不影响聊天。"""
+        def _run():
+            if not MEM_LOCK.acquire(blocking=False):
+                return
+            try:
+                memstore.maybe_extract(
+                    chat_name,
+                    lambda msgs: chat_completion(config, key, msgs,
+                                                 timeout=60, attempts=1),
+                    log_fn=print)
+            except Exception as exc:
+                print(f'[记忆] 整理异常（忽略）：{type(exc).__name__}: {exc}',
+                      flush=True)
+            finally:
+                MEM_LOCK.release()
+
+        threading.Thread(target=_run, daemon=True).start()
+
 
     # ---- 入站去重 ----
     # 同一条消息被处理两次就会回两遍，而这条链路上有好几处会重复投递：
@@ -753,8 +824,15 @@ def main():
                 system = (persona
                           + (voice.VOICE_HINT if use_voice else '')
                           + (sticker.prompt_hint(sticker_lib) if allow_sticker else ''))
+                if mem_on:
+                    # 只在这一条消息上找相关记忆；找不到就不占 prompt
+                    mem = memstore.prompt_block(chat_name, content)
+                    if mem['count']:
+                        system += mem['text']
+                        print(f'记忆：回忆到 {mem["count"]} 条与「{content[:12]}」相关的事',
+                              flush=True)
                 user_msg = {'role': 'user', 'content': content}
-            history = histories.setdefault(chat_name, deque(maxlen=history_size))
+            history = history_of(chat_name)
             messages = [{'role': 'system', 'content': system}, *history, user_msg]
             raw = chat_completion(config, key, messages)
             answer, sticker_cat = sticker.parse(raw) if sticker_on else (raw, None)
@@ -816,10 +894,21 @@ def main():
                     print(f'已识别{kind}并回复（{label}）。', flush=True)
                 else:
                     print(f'已处理一条{label}消息。', flush=True)
-            history.extend([{'role': 'user', 'content': (
-                '[收到一张照片]' if is_photo_msg else
-                '[收到一张表情包]' if is_sticker_msg else content)},
+            user_note = ('[收到一张照片]' if is_photo_msg else
+                         '[收到一张表情包]' if is_sticker_msg else content)
+            history.extend([{'role': 'user', 'content': user_note},
                             {'role': 'assistant', 'content': answer or '[表情包]'}])
+            if mem_on:
+                try:
+                    # 私聊不记说话人（就那一个人）；群聊要记，不然「谁喜欢什么」无从谈起
+                    memstore.log(chat_name, 'user', user_note,
+                                 '' if is_private else speaker_of(sender))
+                    memstore.log(chat_name, 'assistant', answer or '[表情包]')
+                    if memstore.bump(chat_name) >= mem_every:
+                        mem_extract_later(chat_name)
+                except Exception as exc:
+                    print(f'[记忆] 写入失败（忽略）：{type(exc).__name__}: {exc}',
+                          flush=True)
             if want_pic:
                 sticker_inflight.add(chat_name)
                 try:
@@ -1032,8 +1121,14 @@ def main():
                 _GUI_CACHE['gui'] = gui
             proactive.send_text(gui, target['name'], text)
             pstate.mark(target['key'], text)
-            hist = histories.setdefault(target['name'], deque(maxlen=history_size))
+            hist = history_of(target['name'])
             hist.append({'role': 'assistant', 'content': text})
+            if mem_on:
+                try:
+                    # 主动发的也要落盘，否则重启后模型不记得自己说过这句
+                    memstore.log(target['name'], 'assistant', text)
+                except Exception:
+                    pass
             ACTIVITY['ts'] = time.time()
             print(f'已主动发送（{target["label"]}）：{text}', flush=True)
             return 'sent'

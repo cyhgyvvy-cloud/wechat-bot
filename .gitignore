@@ -54,3 +54,6 @@ dist_*/
 release/
 _shot_cfg.py
 _console*.png
+_shot_*.py
+_shot_*.png
+_boot_test.log
