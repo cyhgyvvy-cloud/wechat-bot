@@ -27,6 +27,10 @@
     "diary_budget": 150,
     "diary_input_budget": 6000
   },
+  "cache": {
+    "batch_trim": true,
+    "history_trim_to": 4
+  },
   "startup": {
     "fast_account": true,
     "warmup_gui": true

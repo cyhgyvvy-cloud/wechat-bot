@@ -176,7 +176,57 @@ def current_chance(chat_name: str = '', default: float = 0.25) -> float:
     return by.get(chat_name, _CHANCE_CACHE['base'] if _CHANCE_CACHE['loaded'] else default)
 
 
-def chat_completion(config, key, messages, timeout=90, attempts=3, log=print):
+# ---- 上下文缓存命中统计 ------------------------------------------------
+# DeepSeek 按「请求前缀完全一致」缓存输入，命中的部分按未命中的约 1/50 计价。
+# usage.prompt_cache_hit_tokens 是唯一可信的口径，攒够 20 轮打一次日志并落盘，
+# 控制台读 cache_stats.json 显示。后台整理记忆的调用不 track，免得污染统计。
+_CACHE_LOCK = threading.Lock()
+_CACHE_STATS = {'hit': 0, 'total': 0, 'rounds': 0,
+                'win_hit': 0, 'win_total': 0, 'win_rounds': 0}
+CACHE_REPORT_EVERY = 20
+
+
+def record_cache(hit: int, total: int) -> None:
+    """累计一次主回复的缓存命中；每 20 轮输出日志并更新统计文件。"""
+    if total <= 0:
+        return
+    report = None
+    with _CACHE_LOCK:
+        s = _CACHE_STATS
+        s['hit'] += hit
+        s['total'] += total
+        s['rounds'] += 1
+        s['win_hit'] += hit
+        s['win_total'] += total
+        s['win_rounds'] += 1
+        if s['win_rounds'] >= CACHE_REPORT_EVERY:
+            report = dict(s)
+            s['win_hit'] = s['win_total'] = s['win_rounds'] = 0
+    if report is None:
+        return
+    recent = 100.0 * report['win_hit'] / max(1, report['win_total'])
+    overall = 100.0 * report['hit'] / max(1, report['total'])
+    print('缓存：最近 %d 轮命中率 %.0f%%（命中 %d / 输入 %d token），累计 %.0f%%'
+          % (report['win_rounds'], recent, report['win_hit'],
+             report['win_total'], overall), flush=True)
+    try:
+        payload = {
+            'recent_rate': round(recent, 1),
+            'overall_rate': round(overall, 1),
+            'rounds': report['rounds'],
+            'hit_tokens': report['hit'],
+            'total_tokens': report['total'],
+            'updated': time.time(),
+        }
+        tmp = ROOT / 'cache_stats.tmp'
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(ROOT / 'cache_stats.json')
+    except Exception:
+        pass
+
+
+def chat_completion(config, key, messages, timeout=90, attempts=3, log=print,
+                    track=False):
     """调模型接口，对 429/5xx/网络抖动做指数退避重试。
 
     限流时优先遵守 Retry-After，其次 1.5s→3s 退避；非重试型错误（401/400/内容
@@ -213,7 +263,15 @@ def chat_completion(config, key, messages, timeout=90, attempts=3, log=print):
             continue
         # 4xx（密钥/参数/额度）不属于抖动，立即抛出，别把配置错误拖成多次等待
         resp.raise_for_status()
-        return resp.json()['choices'][0]['message']['content'].strip()
+        data = resp.json()
+        if track:
+            try:
+                u = data.get('usage') or {}
+                record_cache(int(u.get('prompt_cache_hit_tokens') or 0),
+                             int(u.get('prompt_tokens') or 0))
+            except Exception:
+                pass
+        return data['choices'][0]['message']['content'].strip()
     raise RuntimeError(f'模型接口重试 {attempts} 次仍失败：{last}')
 
 
@@ -499,6 +557,25 @@ def main():
     boot_mark('config-ok')
     key = get_key()
     history_size = max(0, int(config.get('history_messages', 12)))
+    # ---- 上下文缓存 ----
+    # 缓存只认「请求前缀完全一致」。history 若每轮滚动左移两条，相邻两轮从第
+    # 一条历史就不同，system 之后全盘失效。改成攒到上限再一次砍到 trim_to 条：
+    # 中间若干轮前缀稳定，实测命中率 57% -> 68%（DeepSeek 按 64 token 分块）。
+    # 代价是上下文条数在 trim_to~history_size 之间周期性波动，可用配置关掉。
+    cache_cfg = config.get('cache') or {}
+    batch_trim = bool(cache_cfg.get('batch_trim', True))
+    trim_to = int(cache_cfg.get('history_trim_to', 4) or 4)
+    if not batch_trim or history_size < 6:
+        trim_to = 0
+    else:
+        trim_to = max(2, min(history_size - 2, trim_to))
+        trim_to -= trim_to % 2                 # 保持 user/assistant 成对
+    if trim_to:
+        print('缓存：history 批量裁剪（%d → %d 条，约每 %d 轮断一次前缀）'
+              % (history_size, trim_to, (history_size - trim_to) // 2 + 1),
+              flush=True)
+    else:
+        print('缓存：history 每轮滚动（批量裁剪未启用）', flush=True)
     # ---- 记忆 ----
     # 两层：会话历史落盘（重启接着聊）+ 长期记忆（日记片段或事实卡片，按相关度召回）。
     # 历史条数沿用 history_messages；长期记忆是另一套容量，互不影响。
@@ -617,12 +694,21 @@ def main():
                     seeded = memstore.history(chat_name, history_size)
                 except Exception:
                     seeded = []
-            h = deque(seeded, maxlen=history_size)
+            # 批量裁剪时不用 maxlen：让长度自然涨到上限再一次性砍短，
+            # 这样相邻多轮的前缀是完全一样的，缓存才接得住
+            h = deque(seeded) if trim_to else deque(seeded, maxlen=max(1, history_size))
             histories[chat_name] = h
             if seeded:
                 print(f'记忆：已恢复「{chat_name}」最近 {len(seeded)} 条对话上下文',
                       flush=True)
         return h
+
+    def add_history(h, items):
+        """追加一轮对话；超过上限时一次砍到 trim_to 条，而不是每轮挤掉两条。"""
+        h.extend(items)
+        if trim_to and len(h) > history_size:
+            while len(h) > trim_to:
+                h.popleft()
 
     MEM_LOCK = threading.Lock()
 
@@ -846,7 +932,7 @@ def main():
                 user_msg = {'role': 'user', 'content': content}
             history = history_of(chat_name)
             messages = [{'role': 'system', 'content': system}, *history, user_msg]
-            raw = chat_completion(config, key, messages)
+            raw = chat_completion(config, key, messages, track=True)
             answer, sticker_cat = sticker.parse(raw) if sticker_on else (raw, None)
             want_pic = allow_sticker and (bool(sticker_cat) or requested)
             if not answer and not want_pic:
@@ -908,8 +994,8 @@ def main():
                     print(f'已处理一条{label}消息。', flush=True)
             user_note = ('[收到一张照片]' if is_photo_msg else
                          '[收到一张表情包]' if is_sticker_msg else content)
-            history.extend([{'role': 'user', 'content': user_note},
-                            {'role': 'assistant', 'content': answer or '[表情包]'}])
+            add_history(history, [{'role': 'user', 'content': user_note},
+                                  {'role': 'assistant', 'content': answer or '[表情包]'}])
             if mem_on:
                 try:
                     # 私聊不记说话人（就那一个人）；群聊要记，不然「谁喜欢什么」无从谈起
@@ -1137,7 +1223,7 @@ def main():
             proactive.send_text(gui, target['name'], text)
             pstate.mark(target['key'], text)
             hist = history_of(target['name'])
-            hist.append({'role': 'assistant', 'content': text})
+            add_history(hist, [{'role': 'assistant', 'content': text}])
             if mem_on:
                 try:
                     # 主动发的也要落盘，否则重启后模型不记得自己说过这句

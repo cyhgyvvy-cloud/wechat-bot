@@ -34,6 +34,20 @@ RETRY_GAP = 8.0              # 每次重试间隔（秒）
 BOT_DIR = paths.ROOT         # 机器人在哪（Console 初始化时按实际目录覆盖）
 
 
+def cache_summary():
+    """读机器人写的 cache_stats.json；超过一小时没更新就别显示旧数字。"""
+    try:
+        p = Path(BOT_DIR) / 'cache_stats.json'
+        if not p.is_file():
+            return ''
+        d = json.loads(p.read_text(encoding='utf-8-sig'))
+        if time.time() - float(d.get('updated') or 0) > 3600:
+            return ''
+        return ' · 缓存命中 %.0f%%' % float(d.get('recent_rate') or 0)
+    except Exception:
+        return ''
+
+
 # ---------------------------------------------------------------- 定位
 def locate_bot():
     """返回 (命令列表, 工作目录, 说明)；找不到返回 (None, None, 说明)。"""
@@ -606,8 +620,8 @@ class Console:
                 if self._launch_at and self._ready_at:
                     boot = ' · 启动 %.1fs' % max(0.0, self._ready_at - self._launch_at)
                 self.lbl_state.configure(text='●  已就绪', style='Ok.TLabel')
-                self.lbl_meta.configure(text='PID %d%s%s · 已运行 %s'
-                                        % (pid, extra, boot, up))
+                self.lbl_meta.configure(text='PID %d%s%s · 已运行 %s%s'
+                                        % (pid, extra, boot, up, cache_summary()))
             else:
                 waiting = ''
                 if self._launch_at:

@@ -57,3 +57,5 @@ _console*.png
 _shot_*.py
 _shot_*.png
 _boot_test.log
+cache_stats.json
+cache_stats.tmp
