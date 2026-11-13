@@ -11,6 +11,7 @@
 """
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -188,6 +189,7 @@ class Console:
         self._started = None      # 已知的启动时间戳
         self._last_pids = []
         self.cfg = {}
+        self._cfg_ok = True       # 配置是否成功读出来（坏 JSON 时禁止保存，免得覆盖）
         self.vars = {}
         self.silent = False       # 开机自启时静默，不弹错误框
         self._launch_at = 0.0     # 本次发起启动的时刻
@@ -640,7 +642,6 @@ class Console:
             self.btn_start.state(['!disabled'])
             self.btn_stop.state(['disabled'])
             self.btn_restart.state(['disabled'])
-        self.root.after(POLL_MS, self.refresh_status)
 
     def do_start(self):
         if find_running():
@@ -870,11 +871,14 @@ class Console:
     def load_config(self):
         try:
             self.cfg = json.loads(self.cfg_path.read_text(encoding='utf-8-sig'))
+            self._cfg_ok = True
         except FileNotFoundError:
             self.cfg = {}
+            self._cfg_ok = True      # 没有文件时允许保存，等于新建一份
             self.lbl_save.configure(text='未找到 config.json', style='Danger.TLabel')
         except Exception as exc:
             self.cfg = {}
+            self._cfg_ok = False     # 读坏了就别让保存把手改的配置覆盖掉
             self.lbl_save.configure(text='配置读取失败：%s' % exc, style='Danger.TLabel')
             return
 
@@ -952,16 +956,48 @@ class Console:
             me['extract_every'] = me['diary_min_msgs'] = max(4, min(500, int(raw)))
         me.setdefault('db', 'cache/memory.db')
 
+        if not getattr(self, '_cfg_ok', True):
+            self.lbl_save.configure(text='配置文件读不出来，已拒绝保存（免得覆盖）',
+                                    style='Danger.TLabel')
+            self.system_log('保存被拒绝：config.json 解析失败，请先修好或删掉它再重开控制台')
+            return
+
+        # 备份是锦上添花：旧备份可能是只读的（安装包解压、资源管理器复制都会带
+        # 只读位），写不进去就跳过，绝不能让主保存跟着失败 —— 否则表现就是
+        # 点一下卡几秒、配置还没存上，看着像程序死了。
+        if self.cfg_path.exists():
+            backup = self.cfg_path.with_suffix('.json.bak')
+            try:
+                old = self.cfg_path.read_bytes()
+                try:
+                    backup.write_bytes(old)
+                except OSError:
+                    try:
+                        os.chmod(backup, stat.S_IWRITE | stat.S_IREAD)
+                        backup.write_bytes(old)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+        # 原子写：先写临时文件再替换，避免写到一半被杀留下半截 JSON
+        tmp = self.cfg_path.with_suffix('.json.tmp')
         try:
-            if self.cfg_path.exists():
-                backup = self.cfg_path.with_suffix('.json.bak')
-                backup.write_bytes(self.cfg_path.read_bytes())
-            self.cfg_path.write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2) + '\n',
-                encoding='utf-8', newline='\n')
+            tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n',
+                           encoding='utf-8', newline='\n')
+            os.replace(tmp, self.cfg_path)
         except Exception as exc:
-            self.lbl_save.configure(text='保存失败：%s' % exc, style='Danger.TLabel')
-            messagebox.showerror(APP_TITLE, '保存失败：%s' % exc)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            hint = '（config.json 被设成只读了，去掉只读属性再试）' \
+                if isinstance(exc, PermissionError) else ''
+            # 不弹模态框：那个框会把主循环卡住等点击，在远程桌面/无焦点时
+            # 用户看到的就是「死机」。状态栏就在保存按钮旁边，够醒目。
+            self.lbl_save.configure(text='保存失败%s：%s' % (hint, exc),
+                                    style='Danger.TLabel')
+            self.system_log('保存失败%s：%s' % (hint, exc))
             return
 
         running = self.is_running()
