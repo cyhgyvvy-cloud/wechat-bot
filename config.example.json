@@ -3,7 +3,7 @@
   "model": "deepseek-flash",
   "group_name": "测试群",
   "bot_name": "机器人",
-  "trigger": "all",
+  "trigger": "mention",
   "prefix": "小鲸",
   "history_messages": 12,
   "private_chats": [
