@@ -202,6 +202,27 @@ system 末尾，前面的固定前缀已经命中了。真正让缓存失效的�
 
 缓存有服务端 TTL，群里长时间没人说话后再开口，第一次请求可能不命中，属于正常。
 
+## 依赖补丁（wechatauto/db.py）
+
+`wechatauto` 是安装在 venv 里的依赖，不在本仓库。本地改过两处，重装依赖后需要重新打：
+
+1. **`WeChatDB.get_self_info()` 连接泄漏**（根因）。它打开 `contact.db` 后直接
+   `return`，没有 `close()`。而 `send_background()` 每条群消息都调它取
+   `self_id`，连接一路泄漏，`contact.db` 一直被占着；Windows 上 SQLite 打开文件
+   时不共享 DELETE 权限，下一次快照的 `os.replace(best, dst)` 就报 `WinError 5`，
+   群消息因此整条失败。私聊走 `chat.SendMsg` 不经过这里，所以表现是「私聊正常、
+   群里完全不回」。修法：查询包 `try/finally`，`finally: conn.close()`。
+
+2. **快照替换加兜底**。`os.replace(best, dst)` 被占用时重试 4 次（间隔 0.25s）；
+   仍失败且已有一份可用副本就沿用它并记 warning，同时不写 stamp（下次调用会
+   重新尝试重建）。宁可少几条最新消息，也不让读链路整体抛异常。
+
+症状对照：控制台显示「已就绪」、私聊能回、群里不回，日志里是
+
+```
+处理消息失败：[WinError 5] 拒绝访问。: '...\cache\contact__contact.db.<pid>.<tid>.tmp' -> '...\cache\contact__contact.db'
+```
+
 ## 目录结构
 
 ```
