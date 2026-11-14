@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('mention', 'all')]
+    [ValidateSet('chance', 'mention', 'all')]
     [string]$Mode = 'mention',
     [string]$ConfigPath = 'C:\微信机器人\config.json'
 )
@@ -28,7 +28,10 @@ $new = [regex]::Replace($text, $pattern, ('${1}"' + $Mode + '"'))
 [IO.File]::WriteAllText($ConfigPath, $new, $enc)
 
 Write-Host ''
-if ($Mode -eq 'mention') {
+if ($Mode -eq 'chance') {
+    Write-Host '已改成：@ 或提到自己必回，其余按概率回（默认 35%）' -ForegroundColor Green
+    Write-Host '到控制台「配置 → 回复方式」可调概率和必回关键词，改完立即生效。' -ForegroundColor Yellow
+} elseif ($Mode -eq 'mention') {
     Write-Host '已改成：群里 @机器人 才回复（私聊照常回复）' -ForegroundColor Green
     Write-Host ''
     Write-Host '注意：@ 出来的名字必须和 config.json 的 bot_name 一致。' -ForegroundColor Yellow

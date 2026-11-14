@@ -503,6 +503,27 @@ class Console:
                         variable=auto_var).grid(row=4, column=0, columnspan=3,
                                                 sticky='w', pady=(8, 2))
 
+        # 回复方式：概率 + 必回条件
+        box = section('回复方式')
+        ttk.Label(box, text='触发方式').grid(row=0, column=0, sticky='w', pady=4)
+        self.vars['trigger'] = tk.StringVar()
+        ttk.Combobox(box, textvariable=self.vars['trigger'],
+                     values=['chance', 'mention', 'all', 'prefix'],
+                     state='readonly', width=16).grid(row=0, column=1, sticky='w',
+                                                      padx=(10, 10), pady=4)
+        ttk.Label(box, text='推荐 chance',
+                  style='Hint.TLabel').grid(row=0, column=2, sticky='w')
+        scale_row(box, 1, '普通消息回复概率', 'reply_chance')
+        ttk.Label(box, text='0%=只@回',
+                  style='Hint.TLabel').grid(row=1, column=2, sticky='w')
+        ttk.Label(box, text='必回关键词').grid(row=2, column=0, sticky='nw', pady=4)
+        self.txt_keywords = tk.Text(box, height=3, width=28, wrap='none',
+                                    font=('Microsoft YaHei UI', 9),
+                                    relief='solid', borderwidth=1)
+        self.txt_keywords.grid(row=2, column=1, sticky='ew', padx=(10, 10), pady=4)
+        ttk.Label(box, text='每行一个；名字与前缀自动算，无需填写',
+                  style='Hint.TLabel').grid(row=3, column=0, columnspan=3, sticky='w')
+
         # 私聊
         box = section('私聊名单')
         ttk.Label(box, text='每行一个好友（备注名优先）。留空 = 不接私聊。',
@@ -887,6 +908,11 @@ class Console:
         self.vars['bot_name'].set(g('bot_name'))
         self.vars['base_url'].set(g('base_url'))
         self.vars['model'].set(g('model'))
+        self.vars['trigger'].set(g('trigger', 'chance') or 'chance')
+        rp = self.cfg.get('reply') or {}
+        self._set_scale('reply_chance', float(rp.get('chance', 0.35)))
+        self.txt_keywords.delete('1.0', 'end')
+        self.txt_keywords.insert('1.0', '\n'.join(rp.get('must_keywords') or []))
 
         self.txt_private.delete('1.0', 'end')
         self.txt_private.insert('1.0', '\n'.join(self.cfg.get('private_chats') or []))
@@ -931,6 +957,11 @@ class Console:
         cfg['bot_name'] = self.vars['bot_name'].get().strip()
         cfg['base_url'] = self.vars['base_url'].get().strip()
         cfg['model'] = self.vars['model'].get().strip()
+        cfg['trigger'] = self.vars['trigger'].get().strip() or 'chance'
+        rp = cfg.setdefault('reply', {})
+        rp['chance'] = round(self.vars['reply_chance'].get() / 100.0, 3)
+        rp['must_keywords'] = [x.strip() for x in
+                               self.txt_keywords.get('1.0', 'end').splitlines() if x.strip()]
         cfg['private_chats'] = [x.strip() for x in
                                 self.txt_private.get('1.0', 'end').splitlines() if x.strip()]
 

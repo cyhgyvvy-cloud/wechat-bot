@@ -176,6 +176,63 @@ def current_chance(chat_name: str = '', default: float = 0.25) -> float:
     return by.get(chat_name, _CHANCE_CACHE['base'] if _CHANCE_CACHE['loaded'] else default)
 
 
+# ---- 概率回复 ----------------------------------------------------------
+# 「普通消息按概率回，@ 自己 / 提到自己必回」。概率与关键词按 config.json 的
+# mtime 热更新，改完立即生效（trigger 本身是启动时读的，切换模式仍需重启）。
+_REPLY_CACHE = {'mtime': None, 'chance': 0.35, 'by_chat': {},
+                'keywords': [], 'loaded': False}
+
+
+def reply_settings(chat_name: str = '', default: float = 0.35,
+                   always_words=()) -> tuple:
+    """返回 (本会话回复概率, 必回关键词列表)。按文件 mtime 惰性重载。"""
+    cfg_path = ROOT / 'config.json'
+    try:
+        mt = cfg_path.stat().st_mtime
+    except OSError:
+        c = _REPLY_CACHE
+        chance = c['by_chat'].get(chat_name, c['chance']) if c['loaded'] else default
+        return chance, list(c['keywords']) + [w for w in always_words if w]
+    if mt != _REPLY_CACHE['mtime']:
+        _REPLY_CACHE['mtime'] = mt
+        try:
+            d = json.loads(cfg_path.read_text(encoding='utf-8-sig')).get('reply') or {}
+            base = max(0.0, min(1.0, float(d.get('chance', default))))
+            by = {}
+            for k, v in (d.get('chance_by_chat') or {}).items():
+                by[str(k).strip()] = max(0.0, min(1.0, float(v)))
+            kws = [str(x).strip() for x in (d.get('must_keywords') or [])
+                   if str(x).strip()]
+            _REPLY_CACHE.update(chance=base, by_chat=by,
+                                keywords=kws, loaded=True)
+            extra = ('，会话覆盖：' + '、'.join(f'{k}={v:.0%}' for k, v in by.items())) if by else ''
+            print(f'回复概率：全局 {base:.0%}{extra}；必回关键词 {len(kws)} 个'
+                  f'（改 config 立即生效）', flush=True)
+        except Exception as exc:
+            print(f'[警告] 回复概率读取失败，沿用上次值：{exc}',
+                  file=sys.stderr, flush=True)
+    c = _REPLY_CACHE
+    chance = c['by_chat'].get(chat_name, c['chance']) if c['loaded'] else default
+    return chance, list(c['keywords']) + [w for w in always_words if w]
+
+
+def must_reply(content: str, name: str, keywords) -> tuple:
+    """是否必回，返回 (bool, 剥掉 @ 后的文本)。
+
+    必回：@机器人（微信成员列表选人会带 U+2005 空格），或消息里出现机器人
+    名字 / 前缀 / 用户配的关键词。手写「@名字+正文」没空格时，关键词分支
+    也能兜住，不会因为漏空格就漏回。
+    """
+    if name:
+        pat = r'@' + re.escape(name) + r'(?:[\s\u2005]|$)'
+        if re.search(pat, content):
+            return True, re.sub(pat, '', content, count=1).strip()
+    for w in keywords:
+        if w and w in content:
+            return True, content
+    return False, content
+
+
 # ---- 上下文缓存命中统计 ------------------------------------------------
 # DeepSeek 按「请求前缀完全一致」缓存输入，命中的部分按未命中的约 1/50 计价。
 # usage.prompt_cache_hit_tokens 是唯一可信的口径，攒够 20 轮打一次日志并落盘，
@@ -878,8 +935,8 @@ def main():
             pt = config.get('private_trigger', 'inherit')
             if pt not in ('', 'inherit', None):
                 trigger = pt
-            if trigger == 'mention':
-                trigger = 'all'  # 私聊没有 @ 的意义
+            if trigger in ('mention', 'chance'):
+                trigger = 'all'  # 私聊没有 @ 的意义，也不该抽概率漏回
         if trigger == 'mention':
             pattern = r'@' + re.escape(name) + r'(?:[\s\u2005]|$)'
             if not re.search(pattern, content):
@@ -890,6 +947,16 @@ def main():
             if not content.startswith(prefix):
                 return
             content = content[len(prefix):].strip()
+        elif trigger == 'chance':
+            # @ 自己 / 提到自己 → 必回；其余按概率，概率与关键词热更新
+            chance, kws = reply_settings(
+                chat_name, 0.35, (name, config.get('prefix', '小鲸')))
+            hit, content = must_reply(content, name, kws)
+            if not hit:
+                if random.random() >= chance:
+                    print(f'回复概率：本轮 {chance:.0%} 未命中，跳过', flush=True)
+                    return
+                print(f'回复概率：本轮 {chance:.0%} 命中', flush=True)
         elif trigger != 'all':
             return
         if not content:
